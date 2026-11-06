@@ -1,0 +1,91 @@
+{% extends "core/base.html" %}
+{% block head %}{% if app.in_flight %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block title %}{{ app.title|default:"Application" }} - Job Finder{% endblock %}
+{% block body %}
+<main class="narrow">
+  <p><a href="{% url 'home' %}">Back to dashboard</a></p>
+
+  {% for message in messages %}
+    <div class="notice {{ message.tags }}" role="status">{{ message }}</div>
+  {% endfor %}
+
+  <div class="card">
+    <h1>{{ app.title|default:"Application" }}{% if app.company %} <span class="muted">at {{ app.company }}</span>{% endif %}</h1>
+    <div class="meta">
+      <span class="chip status-{{ app.status }}">{{ app.get_status_display }}</span>
+      {% if app.score is not None %}<span>Match <strong class="num">{{ app.score }}</strong></span>{% endif %}
+      {% if app.profile %}<span>Using your {{ app.profile.get_market_display }}</span>{% endif %}
+      {% if app.rules_met %}<span>Meets that CV's rules: {{ app.rules_met }}</span>{% endif %}
+      {% if app.location %}<span>{{ app.location }}</span>{% endif %}
+      {% if app.job_url %}<a href="{{ app.job_url }}" target="_blank" rel="noopener noreferrer">Open job posting</a>{% endif %}
+    </div>
+
+    {% if app.note %}
+      <div class="notice {% if app.status == 'failed' %}error{% else %}warn{% endif %}">{{ app.note }}</div>
+    {% endif %}
+    {% if app.reason %}<p>{{ app.reason }}</p>{% endif %}
+
+    {% if app.status == "sent" and app.channel == "form" %}
+      <p class="small muted">Submitted through the website form on {{ app.sent_at|date:"j M Y, H:i" }}.</p>
+    {% elif app.status == "sent" %}
+      <p class="small muted">Sent {{ app.sent_at|date:"j M Y, H:i" }} to {{ app.recipient }}, with your CV attached.</p>
+      <h3>{{ app.subject }}</h3>
+      <div class="sent-body">{{ app.body }}</div>
+    {% elif app.in_flight %}
+      <p class="muted">Working on it. This page updates by itself.</p>
+    {% elif app.body %}
+      <form method="post" action="{% url 'send' app.pk %}">
+        {% csrf_token %}
+        <label for="recipient">To</label>
+        <input id="recipient" type="email" name="recipient" value="{{ app.recipient }}" required>
+        <label for="subject">Subject</label>
+        <input id="subject" type="text" name="subject" value="{{ app.subject }}" maxlength="300" required>
+        <label for="body">Message</label>
+        <textarea id="body" name="body" rows="16" required>{{ app.body }}</textarea>
+        {% if attachment %}<p class="small muted" style="margin-top:8px">Attachment: {{ attachment }}</p>{% endif %}
+        <div class="actions"><button type="submit">Send now</button></div>
+      </form>
+    {% endif %}
+
+    {% if app.can_fill_form or app.can_mark_applied %}
+      <p class="small muted" style="margin-top:16px">Fill the form opens Chrome, fills in what it knows, and leaves the window for you to check and press Submit.</p>
+      <div class="actions">
+        {% if app.can_fill_form %}
+          <form method="post" action="{% url 'fill_form' app.pk %}">{% csrf_token %}<button type="submit">Fill the form</button></form>
+        {% endif %}
+        {% if app.can_mark_applied %}
+          <form method="post" action="{% url 'mark_applied' app.pk %}">{% csrf_token %}<button type="submit" class="secondary">I submitted it</button></form>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    {% if app.can_retry %}
+      <form method="post" action="{% url 'retry' app.pk %}">
+        {% csrf_token %}
+        <div class="actions"><button type="submit" class="secondary">{% if app.body %}Rewrite with Gemini{% else %}Retry{% endif %}</button></div>
+      </form>
+    {% endif %}
+  </div>
+
+  {% if app.form_answers %}
+  <details class="card" style="margin-top:16px" {% if app.status == "sent" or app.status == "needs_you" %}open{% endif %}>
+    <summary>What went into the form</summary>
+    <table style="margin-top:12px">
+      <thead><tr><th>Question</th><th>Answer</th><th>From</th></tr></thead>
+      <tbody>
+        {% for answer in app.form_answers %}
+        <tr><td>{{ answer.label }}</td><td style="white-space:pre-wrap">{{ answer.answer }}</td><td class="muted small">{{ answer.source }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+
+  {% if app.jd_text %}
+  <details class="card" style="margin-top:16px">
+    <summary>Job text used</summary>
+    <div class="sent-body small" style="margin-top:12px">{{ app.jd_text }}</div>
+  </details>
+  {% endif %}
+</main>
+{% endblock %}

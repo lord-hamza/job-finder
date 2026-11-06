@@ -1,0 +1,49 @@
+{% extends "core/base.html" %}
+{% block head %}{% if busy %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block title %}Activity{% endblock %}
+{% block body_attrs %} class="embedded"{% endblock %}
+{% block body %}
+<div class="embedded-wrap">
+  <div class="stats">
+    <span><strong class="num">{{ sent_today }}</strong><span class="muted"> / {{ daily_limit }} sent today</span></span>
+    <span><strong class="num">{{ total_sent }}</strong><span class="muted"> sent in total</span></span>
+    <span><strong class="num">{{ ready_count }}</strong><span class="muted"> ready to send</span></span>
+    <span><strong class="num">{{ manual_count }}</strong><span class="muted"> need you</span></span>
+  </div>
+
+  {% for run in runs %}
+    <div class="run">
+      <span class="chip status-{{ run.status }}">{{ run.get_status_display }}</span>
+      <a href="{{ run.url }}" target="_blank" rel="noopener noreferrer">{{ run.url|truncatechars:70 }}</a>
+      {% if run.status == "running" and run.total %}<span class="muted num">{{ run.done }} of {{ run.total }} jobs</span>{% endif %}
+      {% if run.note %}<div class="muted">{{ run.note }}</div>{% endif %}
+    </div>
+  {% endfor %}
+
+  {% if applications %}
+  <table>
+    <thead>
+      <tr><th>Status</th><th>Job</th><th class="num">Match</th><th class="hide-small">To</th><th class="hide-small">Added</th></tr>
+    </thead>
+    <tbody>
+      {% for app in applications %}
+      <tr>
+        <td class="nowrap"><span class="chip status-{{ app.status }}">{{ app.get_status_display }}</span></td>
+        <td>
+          <a href="{% url 'detail' app.pk %}" target="_top">{{ app.title|default:app.job_url|default:"Pasted job"|truncatechars:80 }}</a>
+          {% if app.company %}<span class="muted">at {{ app.company }}</span>{% endif %}
+          {% if app.profile %}<span class="small muted">({{ app.profile.get_market_display }})</span>{% endif %}
+          {% if app.note %}<div class="small muted">{{ app.note }}</div>{% endif %}
+        </td>
+        <td class="num">{{ app.score|default_if_none:"" }}</td>
+        <td class="hide-small">{% if app.status == "sent" and app.channel == "form" %}Website form{% else %}{{ app.recipient }}{% endif %}</td>
+        <td class="nowrap muted small hide-small">{{ app.created_at|date:"j M, H:i" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Nothing here yet. Paste a job description or add a link above and it will show up here.</p>
+  {% endif %}
+</div>
+{% endblock %}

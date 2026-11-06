@@ -1,0 +1,130 @@
+{% extends "core/base.html" %}
+{% block body %}
+<main>
+  <header class="top">
+    <h1>Job Finder</h1>
+    <div class="chips">
+      {% for profile in profiles %}
+      <span class="chip {% if profile.has_resume %}yes{% else %}no{% endif %}">{{ profile.get_market_display }} {% if profile.has_resume %}ready{% else %}missing{% endif %}</span>
+      {% endfor %}
+      <span class="chip {% if gmail_connected %}yes{% else %}no{% endif %}">Gmail {% if gmail_connected %}connected{% else %}not connected{% endif %}</span>
+      <span class="chip {% if gemini_connected %}yes{% else %}no{% endif %}">Gemini {% if gemini_connected %}connected{% else %}not connected{% endif %}</span>
+    </div>
+  </header>
+
+  {% for message in messages %}
+    <div class="notice {{ message.tags }}" role="status">{{ message }}</div>
+  {% endfor %}
+
+  <details class="card setup" {% if setup_open %}open{% endif %}>
+    <summary>Setup{% if missing %}: {{ missing|join:", " }}{% endif %}</summary>
+    <div class="setup-grid">
+      {% for profile in profiles %}
+      <section>
+        <h3>{{ profile.get_market_display }}</h3>
+        <p class="small muted">For {{ profile.rule_summary }}.{% if profile.has_resume %} Current file: {{ profile.resume_name }}{% endif %}</p>
+        <form method="post" action="{% url 'upload_resume' %}" enctype="multipart/form-data">
+          {% csrf_token %}
+          <input type="hidden" name="market" value="{{ profile.market }}">
+          <label for="resume-{{ profile.market }}">PDF or Word .docx, up to 10 MB</label>
+          <input id="resume-{{ profile.market }}" type="file" name="resume" accept=".pdf,.docx" required>
+          <div class="actions"><button type="submit">Upload {{ profile.get_market_display }}</button></div>
+        </form>
+        {% if profile.has_resume %}
+        <form method="post" action="{% url 'save_profile' %}">
+          {% csrf_token %}
+          <input type="hidden" name="market" value="{{ profile.market }}">
+          <label for="full_name-{{ profile.market }}">Your name (signs your emails)</label>
+          <input id="full_name-{{ profile.market }}" type="text" name="full_name" value="{{ profile.full_name }}" maxlength="120" required>
+          <label for="phone-{{ profile.market }}">Phone (optional)</label>
+          <input id="phone-{{ profile.market }}" type="text" name="phone" value="{{ profile.phone }}" maxlength="40">
+          <label for="linkedin-{{ profile.market }}">LinkedIn (optional)</label>
+          <input id="linkedin-{{ profile.market }}" type="text" name="linkedin" value="{{ profile.linkedin }}" maxlength="200">
+          <div class="actions"><button type="submit" class="secondary">Save details</button></div>
+        </form>
+        {% endif %}
+        <div class="facts">
+          <h3>Facts for application forms</h3>
+          <p class="small muted">Eligibility, location, salary and notice questions are only ever answered from here. Anything missing stops that form and comes back to you, so leave a line blank if you're unsure. Adding your city to the first line helps with forms that ask for it.</p>
+          <form method="post" action="{% url 'save_facts' %}">
+            {% csrf_token %}
+            <input type="hidden" name="market" value="{{ profile.market }}">
+            <label for="facts-{{ profile.market }}">About you</label>
+            <textarea id="facts-{{ profile.market }}" name="facts" rows="9">{{ profile.facts_text }}</textarea>
+            <label class="checkbox">
+              <input type="checkbox" name="allow_consent" {% if profile.allow_consent %}checked{% endif %}>
+              <span>Tick required privacy and data consent boxes for me. Without this, forms that have one come back to you.</span>
+            </label>
+            <div class="actions"><button type="submit" class="secondary">Save facts</button></div>
+          </form>
+        </div>
+      </section>
+      {% endfor %}
+
+      {% if not gmail_connected %}
+      <section>
+        <h3>Gmail</h3>
+        <form method="post" action="{% url 'connect_gmail' %}" autocomplete="off">
+          {% csrf_token %}
+          <label for="address">Gmail address</label>
+          <input id="address" type="email" name="address" required>
+          <label for="password">App Password</label>
+          <input id="password" type="password" name="password" autocomplete="new-password" required>
+          <p class="small muted" style="margin-top:6px">Your normal password won't work. <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">Create an App Password</a> (needs 2-Step Verification on).</p>
+          <div class="actions"><button type="submit">Connect Gmail</button></div>
+        </form>
+      </section>
+      {% endif %}
+
+      {% if not gemini_connected %}
+      <section>
+        <h3>Gemini</h3>
+        <form method="post" action="{% url 'save_gemini' %}" autocomplete="off">
+          {% csrf_token %}
+          <label for="key">API key</label>
+          <input id="key" type="password" name="key" autocomplete="new-password" required>
+          <p class="small muted" style="margin-top:6px"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get a key from Google AI Studio</a></p>
+          <div class="actions"><button type="submit">Save key</button></div>
+        </form>
+      </section>
+      {% endif %}
+    </div>
+  </details>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Paste a job description</h2>
+      <p class="small muted">Include the email address to apply to. Gemini tailors the email and it goes out from your Gmail with your CV attached. Only jobs that meet that CV's rules go out by themselves.</p>
+      <form method="post" action="{% url 'apply_jd' %}">
+        {% csrf_token %}
+        <label for="jd">Job description</label>
+        <textarea id="jd" name="jd" rows="11" required>{{ jd_text|default:"" }}</textarea>
+        {% include "core/cv_choice.html" %}
+        <div class="actions">
+          <button type="submit" name="action" value="send">Tailor &amp; send</button>
+          <button type="submit" name="action" value="draft" class="secondary">Save as draft</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Find jobs from a link</h2>
+      <p class="small muted">A job board search, a careers page or a single job. It opens the best matches, scores them against your CV and applies by email, or through the site's form if there's no email.</p>
+      <form method="post" action="{% url 'start_crawl' %}">
+        {% csrf_token %}
+        <label for="url">Link</label>
+        <input id="url" type="text" inputmode="url" name="url" value="{{ crawl_url|default:'' }}" placeholder="https://" required>
+        {% include "core/cv_choice.html" %}
+        <label class="checkbox">
+          <input type="checkbox" name="auto_send" {% if crawl_auto_send is None or crawl_auto_send %}checked{% endif %}>
+          <span>Apply automatically when the job meets that CV's rules and the match score is {{ min_score }} or higher</span>
+        </label>
+        <div class="actions"><button type="submit">Find &amp; apply</button></div>
+      </form>
+      <p class="small muted" style="margin-top:12px">Chrome windows will open while it fills in forms. A form is only submitted when every required answer is known. If not, or if there's a CAPTCHA or a login, it shows as "Needs you". Sites that block automated access can't be crawled, so paste those jobs on the left.</p>
+    </section>
+  </div>
+
+  <iframe class="activity" src="{% url 'activity' %}" title="Activity"></iframe>
+</main>
+{% endblock %}
