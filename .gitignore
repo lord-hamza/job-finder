@@ -1,0 +1,21 @@
+# Secrets: real keys live in .env, which is never committed
+.env
+.env.*
+!.env.example
+
+# Personal data: the uploaded CV and application history
+data/
+*.sqlite3
+*.pdf
+*.docx
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
