@@ -2,44 +2,42 @@ from django.db import models
 
 
 class Profile(models.Model):
-    """One CV, with the contact details and facts that go with it. There's one per job market."""
+    """You: the details, facts and job rules that go with every CV. There's only one."""
 
-    class Market(models.TextChoices):
-        UK = "uk", "UK CV"
-        PAKISTAN = "pk", "Pakistan CV"
+    DEFAULT_ONSITE_PLACES = "Pakistan, Lahore, Islamabad, Karachi, Rawalpindi"
+    DEFAULT_REMOTE_COUNTRIES = "United Kingdom, United States"
 
-    RULE_SUMMARIES = {
-        Market.UK: "fully remote jobs only",
-        Market.PAKISTAN: "AI engineer jobs, remote, hybrid or on-site, in Lahore or Islamabad only",
-    }
-
-    market = models.CharField(max_length=2, choices=Market.choices, default=Market.UK, unique=True)
-    selected = models.BooleanField(default=True)  # the last "Apply with" choice
     full_name = models.CharField(max_length=120, blank=True)
     phone = models.CharField(max_length=40, blank=True)
     linkedin = models.CharField(max_length=200, blank=True)
-    resume_name = models.CharField(max_length=200, blank=True)
-    resume_bytes = models.BinaryField(default=bytes, blank=True)
-    resume_text = models.TextField(blank=True)
     facts = models.TextField(blank=True)  # what forms ask that a CV doesn't say
     allow_consent = models.BooleanField(default=False)  # may tick required privacy boxes
+    onsite_places = models.CharField(max_length=300, blank=True, default=DEFAULT_ONSITE_PLACES)  # any work setup here
+    remote_countries = models.CharField(max_length=300, blank=True, default=DEFAULT_REMOTE_COUNTRIES)  # blank: anywhere
     updated_at = models.DateTimeField(auto_now=True)
 
     @classmethod
-    def load(cls, market=Market.UK):
-        return cls.objects.get_or_create(market=market, defaults={"selected": market == cls.Market.UK})[0]
-
-    @classmethod
-    def options(cls):
-        return [cls.load(market) for market in cls.Market.values]
+    def load(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
 
     @property
     def rule_summary(self):
-        return self.RULE_SUMMARIES[self.market]
+        remote = f"fully remote jobs from {self.remote_countries or 'anywhere'}"
+        return f"any work setup in {self.onsite_places}, and {remote}" if self.onsite_places else f"only {remote}"
 
-    @property
-    def has_resume(self):
-        return bool(self.resume_text and self.resume_bytes)
+
+class Resume(models.Model):
+    """One CV. Gemini picks whichever suits each job best."""
+
+    MAX_COUNT = 10
+
+    name = models.CharField(max_length=200)
+    data = models.BinaryField()
+    text = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
 
 
 class CrawlRun(models.Model):
@@ -50,7 +48,6 @@ class CrawlRun(models.Model):
 
     url = models.URLField(max_length=2000)
     auto_send = models.BooleanField(default=True)
-    markets = models.JSONField(default=list, blank=True)  # the CVs ticked for this crawl
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.RUNNING)
     total = models.PositiveIntegerField(default=0)
     done = models.PositiveIntegerField(default=0)
@@ -91,9 +88,8 @@ class Application(models.Model):
         CrawlRun, null=True, blank=True, on_delete=models.SET_NULL, related_name="applications"
     )
     auto_send = models.BooleanField(default=True)
-    markets = models.JSONField(default=list, blank=True)  # the CVs ticked for this job
-    profile = models.ForeignKey(
-        Profile, null=True, blank=True, on_delete=models.SET_NULL, related_name="applications"
+    resume = models.ForeignKey(
+        Resume, null=True, blank=True, on_delete=models.SET_NULL, related_name="applications"
     )  # the CV chosen for it
     job_url = models.URLField(max_length=2000, blank=True)
     jd_text = models.TextField(blank=True)
@@ -102,7 +98,7 @@ class Application(models.Model):
     title = models.CharField(max_length=300, blank=True)
     company = models.CharField(max_length=200, blank=True)
     location = models.CharField(max_length=200, blank=True)
-    rules_met = models.CharField(max_length=10, blank=True)  # does the job meet the chosen CV's rules?
+    rules_met = models.CharField(max_length=10, blank=True)  # does the job meet your job rules?
     score = models.IntegerField(null=True, blank=True)
     reason = models.TextField(blank=True)
 

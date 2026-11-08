@@ -11,7 +11,7 @@ from django.views.decorators.http import require_GET, require_POST
 from dotenv import set_key
 
 from . import emails, llm, mailer, pipeline, prompts, resume
-from .models import IN_FLIGHT, Application, CrawlRun, Profile
+from .models import IN_FLIGHT, Application, CrawlRun, Profile, Resume
 
 MIN_JD_CHARS = 100
 Status = Application.Status
@@ -25,29 +25,19 @@ def _save_env(**values):
     os.chmod(settings.ENV_FILE, 0o600)
 
 
-def _market(request):
-    market = request.POST.get("market")
-    return market if market in Profile.Market.values else Profile.Market.UK
-
-
-def _ticked_markets(request):
-    ticked = request.POST.getlist("cv")
-    return [market for market in Profile.Market.values if market in ticked]
-
-
 def _render_home(request, **context):
     pipeline.recover_interrupted()
-    profiles = Profile.options()
-    for profile in profiles:
-        profile.facts_text = pipeline.facts(profile)
-    missing = pipeline.missing_setup([profile.market for profile in profiles if profile.selected])
+    profile = Profile.load()
+    missing = pipeline.missing_setup()
     return render(
         request,
         "core/home.html",
         {
-            "profiles": profiles,
+            "profile": profile,
+            "resumes": Resume.objects.all(),
+            "facts_text": pipeline.facts(profile),
             "missing": missing,
-            "setup_open": bool(missing) or any(not profile.has_resume or not profile.facts for profile in profiles),
+            "setup_open": bool(missing) or not profile.facts,
             "gmail_address": mailer.address(),
             "gmail_connected": mailer.is_configured(),
             "gemini_connected": bool(llm.api_key()),
@@ -68,7 +58,7 @@ def activity(request):
     """Shown in an iframe so it can refresh itself without touching the forms around it."""
     pipeline.recover_interrupted()
     pipeline.ensure_form_worker()
-    applications = list(Application.objects.select_related("profile")[:200])
+    applications = list(Application.objects.select_related("resume")[:200])
     runs = list(CrawlRun.objects.all()[:5])
     busy = any(app.in_flight for app in applications) or any(
         run.status == CrawlRun.Status.RUNNING for run in runs
@@ -91,18 +81,29 @@ def activity(request):
 
 @require_POST
 def upload_resume(request):
-    upload = request.FILES.get("resume")
-    if not upload:
+    uploads = request.FILES.getlist("resume")
+    if not uploads:
         messages.error(request, "Choose a PDF or Word .docx file first.")
-    elif upload.size > resume.MAX_BYTES:
-        messages.error(request, "That file is over 10 MB, which is too big to attach to an application.")
-    else:
+    saved = 0
+    for upload in uploads:
         try:
-            pipeline.save_resume(upload.name, upload.read(), _market(request))
+            if upload.size > resume.MAX_BYTES:
+                raise resume.ResumeError("That file is over 10 MB, which is too big to attach to an application.")
+            pipeline.save_resume(upload.name, upload.read())
         except resume.ResumeError as exc:
-            messages.error(request, str(exc))
+            messages.error(request, f"{upload.name}: {exc}" if len(uploads) > 1 else str(exc))
         else:
-            messages.success(request, "CV saved. Check that your details below are right.")
+            saved += 1
+    if saved:
+        cvs = "CV" if saved == 1 else f"{saved} CVs"
+        messages.success(request, f"{cvs} saved. Check that your details below are right.")
+    return redirect("home")
+
+
+@require_POST
+def delete_resume(request, pk):
+    Resume.objects.filter(pk=pk).delete()
+    messages.success(request, "CV removed.")
     return redirect("home")
 
 
@@ -112,7 +113,7 @@ def save_profile(request):
     if not name:
         messages.error(request, "Your name is needed to sign your emails.")
         return redirect("home")
-    profile = Profile.load(_market(request))
+    profile = Profile.load()
     profile.full_name = name[:120]
     profile.phone = " ".join(request.POST.get("phone", "").split())[:40]
     profile.linkedin = " ".join(request.POST.get("linkedin", "").split())[:200]
@@ -124,11 +125,24 @@ def save_profile(request):
 @require_POST
 def save_facts(request):
     text = request.POST.get("facts", "").replace("\r\n", "\n").strip()
-    profile = Profile.load(_market(request))
-    profile.facts = "" if text == prompts.FACTS_TEMPLATES[profile.market] else text[:5000]
+    profile = Profile.load()
+    profile.facts = "" if text == prompts.FACTS_TEMPLATE else text[:5000]
     profile.allow_consent = request.POST.get("allow_consent") == "on"
     profile.save()
     messages.success(request, "Facts saved.")
+    return redirect("home")
+
+
+@require_POST
+def save_rules(request):
+    def places(field):
+        return ", ".join(pipeline.split_places(request.POST.get(field, "")))[:300]
+
+    profile = Profile.load()
+    profile.onsite_places = places("onsite_places")
+    profile.remote_countries = places("remote_countries")
+    profile.save()
+    messages.success(request, f"Job rules saved: {profile.rule_summary}.")
     return redirect("home")
 
 
@@ -179,11 +193,7 @@ def apply_jd(request):
         messages.error(request, message)
         return _render_home(request, jd_text=text)
 
-    markets = _ticked_markets(request)
-    if not markets:
-        return refuse("Tick at least one CV to apply with.")
-    pipeline.remember_selection(markets)
-    missing = pipeline.missing_setup(markets, need_gmail=auto_send)
+    missing = pipeline.missing_setup(need_gmail=auto_send)
     if missing:
         return refuse(f"First, {', '.join(missing)}.")
     if len(text) < MIN_JD_CHARS:
@@ -197,7 +207,7 @@ def apply_jd(request):
             )
         return refuse("No email address in that text. Add one, or use Save as draft to type it yourself.")
 
-    app, is_new = pipeline.submit_jd(text, auto_send, markets)
+    app, is_new = pipeline.submit_jd(text, auto_send)
     if is_new:
         pipeline.spawn(pipeline.process, app.pk)
         messages.success(request, "On it. Progress shows in the activity list below.")
@@ -215,11 +225,7 @@ def start_crawl(request):
         messages.error(request, message)
         return _render_home(request, crawl_url=url, crawl_auto_send=auto_send)
 
-    markets = _ticked_markets(request)
-    if not markets:
-        return refuse("Tick at least one CV to apply with.")
-    pipeline.remember_selection(markets)
-    missing = pipeline.missing_setup(markets, need_gmail=auto_send)
+    missing = pipeline.missing_setup(need_gmail=auto_send)
     if missing:
         return refuse(f"First, {', '.join(missing)}.")
     if url and "://" not in url:
@@ -230,7 +236,7 @@ def start_crawl(request):
         return refuse("Enter a valid web link, like https://example.com/jobs")
     if len(url) > 2000:
         return refuse("That link is too long.")
-    run = CrawlRun.objects.create(url=url, auto_send=auto_send, markets=markets)
+    run = CrawlRun.objects.create(url=url, auto_send=auto_send)
     pipeline.spawn(pipeline.run_crawl, run.pk)
     messages.success(request, "Crawl started. Progress shows in the activity list below.")
     return redirect("home")
@@ -240,11 +246,10 @@ def start_crawl(request):
 def detail(request, pk):
     pipeline.recover_interrupted()
     app = get_object_or_404(Application, pk=pk)
-    profile = app.profile or Profile.load()
     return render(
         request,
         "core/detail.html",
-        {"app": app, "attachment": pipeline.attachment_name(profile) if profile.has_resume else ""},
+        {"app": app, "attachment": pipeline.attachment_name(Profile.load(), app.resume) if app.resume else ""},
     )
 
 

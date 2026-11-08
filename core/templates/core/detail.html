@@ -14,8 +14,8 @@
     <div class="meta">
       <span class="chip status-{{ app.status }}">{{ app.get_status_display }}</span>
       {% if app.score is not None %}<span>Match <strong class="num">{{ app.score }}</strong></span>{% endif %}
-      {% if app.profile %}<span>Using your {{ app.profile.get_market_display }}</span>{% endif %}
-      {% if app.rules_met %}<span>Meets that CV's rules: {{ app.rules_met }}</span>{% endif %}
+      {% if app.resume %}<span>Using {{ app.resume.name }}</span>{% endif %}
+      {% if app.rules_met %}<span>Meets your job rules: {{ app.rules_met }}</span>{% endif %}
       {% if app.location %}<span>{{ app.location }}</span>{% endif %}
       {% if app.job_url %}<a href="{{ app.job_url }}" target="_blank" rel="noopener noreferrer">Open job posting</a>{% endif %}
     </div>

@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from core import crawler, llm, mailer, pipeline, prompts, resume
 from core.crawler import CrawlError, Page
-from core.models import Application, CrawlRun, Profile
+from core.models import Application, CrawlRun, Profile, Resume
 from core.tests.base import CV_TEXT, GOOD_BODY, JD_TEXT, AppTestCase, gemini_job, minimal_pdf
 
 Status = Application.Status
@@ -161,7 +161,7 @@ class RemoteOnlyTests(PipelineTestCase):
         self.gemini(gemini_job(rules_met="no"))
         app = self.submit()
         self.assertEqual(app.status, Status.SKIPPED)
-        self.assertIn("Not fully remote", app.note)
+        self.assertIn("Doesn't meet your job rules (any work setup in Pakistan", app.note)
         self.assertEqual(mail.outbox, [])
 
     def test_pasted_job_that_doesnt_say_isnt_sent(self):
@@ -213,15 +213,16 @@ class RemoteOnlyTests(PipelineTestCase):
 
 
 class FactsTests(PipelineTestCase):
-    def test_treated_as_living_in_the_uk_until_told_otherwise(self):
+    def test_starting_text_and_job_rules_reach_gemini(self):
         generate = self.gemini(gemini_job())
         self.submit()
         prompt = generate.call_args.args[0]
-        self.assertIn("Where I live now: United Kingdom", prompt)
-        self.assertIn("fully remote only", prompt)
+        self.assertIn("Where I live now:\n", prompt)
+        self.assertIn("Jobs in Pakistan, Lahore, Islamabad, Karachi, Rawalpindi are fine whether on-site, hybrid or remote", prompt)
+        self.assertIn("only fully remote jobs based in United Kingdom, United States", prompt)
 
-    def test_living_in_the_uk_says_nothing_about_right_to_work(self):
-        self.assertIn("Right to work in the UK (yes/no, and what kind):\n", prompts.FACTS_TEMPLATE)
+    def test_living_in_a_country_says_nothing_about_right_to_work(self):
+        self.assertIn("Right to work (which countries, and what kind):\n", prompts.FACTS_TEMPLATE)
         self.assertIn("Living in a country doesn't mean having the right to work", prompts.TAILOR_SYSTEM)
         self.assertIn("nothing after its colon isn't stated", prompts.FORM_SYSTEM)
 
@@ -230,7 +231,7 @@ class FactsTests(PipelineTestCase):
         generate = self.gemini(gemini_job())
         self.submit()
         self.assertIn("Leeds, UK", generate.call_args.args[0])
-        self.assertNotIn("Where I live now: United Kingdom", generate.call_args.args[0])
+        self.assertNotIn("Where I live now:\n", generate.call_args.args[0])
 
 
 class EmailQualityTests(PipelineTestCase):
@@ -330,7 +331,7 @@ class EmailQualityTests(PipelineTestCase):
 
     def test_fencing_stays_fast_on_long_blank_runs(self):
         started = time.monotonic()
-        prompts.tailor_prompt([], "<" + " " * 200_000, [], "2026-11-05")
+        prompts.tailor_prompt("Sam", "", "", [], "<" + " " * 200_000, [], "2026-11-05")
         self.assertLess(time.monotonic() - started, 5)
 
 
@@ -389,6 +390,7 @@ class SendGuardTests(PipelineTestCase):
             "recipient": "careers@acme.co.uk",
             "subject": "Hi",
             "body": "Hello",
+            "resume": Resume.objects.first(),
         }
         defaults.update(fields)
         return Application.objects.create(**defaults)
@@ -438,9 +440,9 @@ class SendGuardTests(PipelineTestCase):
                 self.assertIn(expected, app.note)
         self.assertEqual(mail.outbox, [])
 
-    def test_no_cv_blocks_sending(self):
-        Profile.objects.filter(pk=1).update(resume_bytes=b"", resume_text="")
+    def test_removed_cv_blocks_sending(self):
         app = self.ready()
+        Resume.objects.all().delete()
         pipeline.send_application(app.pk)
         app.refresh_from_db()
         self.assertIn("CV", app.note)
@@ -454,7 +456,7 @@ class SendGuardTests(PipelineTestCase):
         self.assertEqual(mail.outbox, [])
 
     def test_docx_attachment_type_and_name(self):
-        Profile.objects.filter(pk=1).update(resume_name="CV.DOCX")
+        Resume.objects.update(name="CV.DOCX")
         app = self.ready()
         pipeline.send_application(app.pk)
         name, _, mimetype = mail.outbox[0].attachments[0]
@@ -464,7 +466,7 @@ class SendGuardTests(PipelineTestCase):
     def test_name_with_odd_characters_makes_a_safe_filename(self):
         profile = Profile.load()
         profile.full_name = "Zoë O'Neil / Dev"
-        self.assertEqual(pipeline.attachment_name(profile), "Zoë_O_Neil_Dev_CV.pdf")
+        self.assertEqual(pipeline.attachment_name(profile, self.cv), "Zoë_O_Neil_Dev_CV.pdf")
 
 
 class CrawlFlowTests(PipelineTestCase):
@@ -582,7 +584,8 @@ class CrawlFlowTests(PipelineTestCase):
         self.assertEqual(app.status, Status.SKIPPED)
         self.assertIn("hybrid role", app.note)
 
-    def test_listing_link_labelled_hybrid_isnt_even_opened(self):
+    def test_listing_link_labelled_hybrid_isnt_even_opened_when_only_remote_is_allowed(self):
+        Profile.objects.filter(pk=1).update(onsite_places="")
         self.pages[self.LISTING].links[0] = (self.JOB1, "Python Dev - Hybrid working")
         self.gemini(self.triage(1, 2), gemini_job(application_email=""))
         run = self.crawl()
@@ -788,24 +791,26 @@ class SaveResumeTests(AppTestCase):
     def test_readable_cv_saves_without_ever_calling_gemini(self):
         with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
             with mock.patch("core.llm.generate_json") as generate:
-                profile = pipeline.save_resume("cv.pdf", self.PDF)
+                cv = pipeline.save_resume("cv.pdf", self.PDF)
         generate.assert_not_called()
+        profile = Profile.load()
         self.assertEqual(profile.full_name, "Sam Taylor")
         self.assertEqual(profile.phone, "+44 7700 900123")
-        self.assertEqual(bytes(profile.resume_bytes), self.PDF)
+        self.assertEqual(bytes(cv.data), self.PDF)
 
     def test_works_without_gemini_key(self):
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
             with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
-                self.assertEqual(pipeline.save_resume("cv.pdf", self.PDF).full_name, "Sam Taylor")
+                pipeline.save_resume("cv.pdf", self.PDF)
+        self.assertEqual(Profile.load().full_name, "Sam Taylor")
 
     def test_scanned_pdf_read_by_gemini(self):
         with mock.patch("core.llm.generate_json", return_value={"text": CV_TEXT}) as generate:
-            profile = pipeline.save_resume("scan.pdf", minimal_pdf(" "))
+            cv = pipeline.save_resume("scan.pdf", minimal_pdf(" "))
         self.assertEqual(generate.call_args.kwargs["pdf"], minimal_pdf(" "))
         self.assertFalse(generate.call_args.kwargs["patient"], "someone is waiting on the page")
-        self.assertEqual(profile.full_name, "Sam Taylor")
-        self.assertEqual(profile.resume_text, CV_TEXT.strip())
+        self.assertEqual(Profile.load().full_name, "Sam Taylor")
+        self.assertEqual(cv.text, CV_TEXT.strip())
 
     def test_scanned_pdf_without_key_explains(self):
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
@@ -826,22 +831,21 @@ class SaveResumeTests(AppTestCase):
         self.make_profile()
         with self.assertRaises(resume.ResumeError):
             pipeline.save_resume("cv.pdf", b"not a pdf")
-        self.assertEqual(bytes(Profile.load().resume_bytes), b"%PDF-1.4 fake cv bytes")
+        self.assertEqual(bytes(Resume.objects.get().data), b"%PDF-1.4 fake cv bytes")
 
-    def test_new_cv_keeps_details_it_doesnt_mention(self):
-        self.make_profile(phone="07000 000000")
-        with mock.patch("core.pipeline.resume.extract_text", return_value="x" * 300):
-            with mock.patch("core.llm.generate_json", return_value={"full_name": "", "phone": "", "linkedin": ""}):
-                profile = pipeline.save_resume("cv.pdf", self.PDF)
-        self.assertEqual(profile.phone, "07000 000000")
-        self.assertEqual(profile.full_name, "Sam Taylor")
+    def test_new_cv_never_overwrites_your_details(self):
+        self.make_profile(full_name="Sam T", phone="07000 000000")
+        with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
+            pipeline.save_resume("cv.pdf", self.PDF)
+        profile = Profile.load()
+        self.assertEqual((profile.full_name, profile.phone), ("Sam T", "07000 000000"))
 
     def test_long_file_name_keeps_extension(self):
         with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
             with mock.patch("core.llm.generate_json", side_effect=llm.LLMError("down")):
-                profile = pipeline.save_resume(("x" * 300) + ".pdf", self.PDF)
-        self.assertTrue(profile.resume_name.endswith(".pdf"))
-        self.assertLessEqual(len(profile.resume_name), 200)
+                cv = pipeline.save_resume(("x" * 300) + ".pdf", self.PDF)
+        self.assertTrue(cv.name.endswith(".pdf"))
+        self.assertLessEqual(len(cv.name), 200)
 
 
 class EnvSettingsTests(AppTestCase):

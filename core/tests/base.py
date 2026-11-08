@@ -7,7 +7,7 @@ from unittest import mock
 
 from django.test import TestCase, TransactionTestCase, override_settings
 
-from core.models import Profile
+from core.models import Profile, Resume
 
 CV_TEXT = (
     "Sam Taylor\n+44 7700 900123\nlinkedin.com/in/samtaylor\n"
@@ -95,19 +95,23 @@ class AppTestMixin:
         self.addCleanup(patcher.disable if hasattr(patcher, "disable") else patcher.stop)
 
     def make_profile(self, **overrides):
+        """You, with one CV uploaded. resume_* overrides go to the CV."""
         fields = {
             "full_name": "Sam Taylor",
             "phone": "+44 7700 900123",
             "linkedin": "linkedin.com/in/samtaylor",
-            "resume_name": "my cv final (2).pdf",
-            "resume_bytes": b"%PDF-1.4 fake cv bytes",
-            "resume_text": CV_TEXT,
         }
-        fields.update(overrides)
+        cv = {"name": "my cv final (2).pdf", "data": b"%PDF-1.4 fake cv bytes", "text": CV_TEXT}
+        for key, value in overrides.items():
+            if key.startswith("resume_"):
+                cv[{"resume_name": "name", "resume_bytes": "data", "resume_text": "text"}[key]] = value
+            else:
+                fields[key] = value
         profile = Profile.load()
         for key, value in fields.items():
             setattr(profile, key, value)
         profile.save()
+        self.cv = Resume.objects.create(**cv)
         return profile
 
 

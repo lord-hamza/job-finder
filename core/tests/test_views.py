@@ -7,7 +7,7 @@ from django.test import Client
 from django.urls import reverse
 
 from core import llm, mailer
-from core.models import Application, CrawlRun, Profile
+from core.models import Application, CrawlRun, Profile, Resume
 from core.tests.base import CV_TEXT, JD_TEXT, AppTestCase, gemini_job, minimal_pdf
 
 Status = Application.Status
@@ -29,6 +29,7 @@ class ViewTestCase(AppTestCase):
             "recipient": "careers@acme.co.uk",
             "subject": "Hi",
             "body": "Hello",
+            "resume": Resume.objects.first(),
         }
         defaults.update(fields)
         return Application.objects.create(**defaults)
@@ -54,19 +55,18 @@ class HomeTests(ViewTestCase):
         self.assertContains(response, 'name="password"')
         self.assertContains(response, 'name="key"')
 
-    def test_setup_stays_open_until_both_cvs_and_their_facts_are_done(self):
+    def test_setup_stays_open_until_facts_are_done(self):
         self.assertTrue(self.client.get(reverse("home")).context["setup_open"])
-        self.client.post(reverse("save_facts"), {"facts": "Where I live now: Leeds, UK"})
-        self.assertTrue(self.client.get(reverse("home")).context["setup_open"])
-        Profile.objects.filter(market="pk").update(resume_text="cv", resume_bytes=b"cv", facts="Where I live now: Lahore")
+        self.client.post(reverse("save_facts"), {"facts": "Where I live now: Lahore"})
         self.assertFalse(self.client.get(reverse("home")).context["setup_open"])
 
     def test_empty_install_points_to_setup(self):
         Profile.objects.all().delete()
+        Resume.objects.all().delete()
         with mock.patch.dict(os.environ, {"GMAIL_ADDRESS": "", "GMAIL_APP_PASSWORD": "", "GEMINI_API_KEY": ""}):
             response = self.client.get(reverse("home"))
         self.assertEqual(
-            response.context["missing"], ["upload your UK CV", "connect Gmail", "add your Gemini API key"]
+            response.context["missing"], ["upload your CV", "connect Gmail", "add your Gemini API key"]
         )
         self.assertContains(response, "CV missing")
 
@@ -146,7 +146,7 @@ class UploadTests(AppTestCase):
             with mock.patch("core.llm.generate_json", return_value=details):
                 response = self.upload("cv.pdf", minimal_pdf("x"))
         self.assertContains(response, "CV saved")
-        self.assertTrue(Profile.load().has_resume)
+        self.assertTrue(Resume.objects.filter(name="cv.pdf").exists())
 
     def test_no_file(self):
         self.assertContains(self.client.post(reverse("upload_resume"), follow=True), "Choose a PDF")
@@ -160,7 +160,7 @@ class UploadTests(AppTestCase):
     def test_garbage_pdf(self):
         response = self.upload("cv.pdf", b"garbage")
         self.assertContains(response, "valid PDF")
-        self.assertFalse(Profile.load().has_resume)
+        self.assertEqual(Resume.objects.filter(name="cv.pdf").count(), 0)
 
 
 class ProfileTests(ViewTestCase):
@@ -229,7 +229,7 @@ class SaveGeminiTests(ViewTestCase):
 
 class ApplyTests(ViewTestCase):
     def post(self, jd=JD_TEXT, action="send"):
-        return self.client.post(reverse("apply_jd"), {"jd": jd, "action": action, "cv": ["uk"]}, follow=True)
+        return self.client.post(reverse("apply_jd"), {"jd": jd, "action": action}, follow=True)
 
     def test_sends_straight_away(self):
         with mock.patch("core.llm.generate_json", return_value=gemini_job()):
@@ -278,9 +278,9 @@ class ApplyTests(ViewTestCase):
         self.assertContains(self.post(""), "whole job description")
 
     def test_setup_incomplete(self):
-        Profile.objects.all().delete()
+        Resume.objects.all().delete()
         response = self.post()
-        self.assertContains(response, "upload your UK CV")
+        self.assertContains(response, "upload your CV")
         self.assertContains(response, "To apply, send your CV")
         self.assertEqual(Application.objects.count(), 0)
 
@@ -314,7 +314,7 @@ class ApplyTests(ViewTestCase):
 
 class CrawlViewTests(ViewTestCase):
     def post(self, url, auto_send="on"):
-        data = {"url": url, "cv": ["uk"]}
+        data = {"url": url}
         if auto_send:
             data["auto_send"] = auto_send
         return self.client.post(reverse("start_crawl"), data, follow=True)
@@ -347,8 +347,8 @@ class CrawlViewTests(ViewTestCase):
         self.assertContains(self.post("not a link"), "not a link")
 
     def test_setup_incomplete(self):
-        Profile.objects.all().delete()
-        self.assertContains(self.post("https://board.example/jobs"), "upload your UK CV")
+        Resume.objects.all().delete()
+        self.assertContains(self.post("https://board.example/jobs"), "upload your CV")
         self.assertEqual(CrawlRun.objects.count(), 0)
 
     def test_too_long(self):

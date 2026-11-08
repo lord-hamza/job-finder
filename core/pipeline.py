@@ -12,7 +12,7 @@ from django.db import connections
 from django.utils import timezone
 
 from . import crawler, emails, formfill, llm, mailer, prompts, resume
-from .models import IN_FLIGHT, Application, CrawlRun, Profile
+from .models import IN_FLIGHT, Application, CrawlRun, Profile, Resume
 
 log = logging.getLogger(__name__)
 
@@ -53,18 +53,8 @@ _OFFICE_WORK = re.compile(
     r"|\battend(ing)? (the|our|an?) (\w+ )?office\b|\bcommut(able|ing) distance\b|\bwithin commuting\b",
     re.I | re.M,
 )
-# What the Pakistan CV's rules need the posting itself to mention, whatever Gemini made of it.
-_AI_WORK = re.compile(r"\b(ai|a\.i\.|ml|machine learning|deep learning|llms?|gen ?ai|generative|artificial intelligence|nlp|computer vision)\b", re.I)
-_PAKISTAN_CITIES = re.compile(r"\b(lahore|islamabad)\b", re.I)
-_REMOTE_WORK = re.compile(r"\b(remote|remotely|work from home|wfh|work from anywhere)\b", re.I)
-_RULES_NOT_MET = {
-    "uk": "Not fully remote for someone in the UK, so this wasn't applied to.",
-    "pk": "Not an AI engineering job in Lahore or Islamabad, so this wasn't applied to.",
-}
-_RULES_UNCLEAR = {
-    "uk": "The posting doesn't say it's fully remote, so this wasn't applied to.",
-    "pk": "The posting doesn't say where the job is, so this wasn't applied to.",
-}
+RULES_NOT_MET = "Doesn't meet your job rules ({}), so this wasn't applied to."
+RULES_UNCLEAR = "The posting doesn't say where or how the work is done, so this wasn't applied to."
 _RULED_OUT = re.compile(r"\b(not|no|non|never|without|isn't|aren't|can be|could be|may be)\b[^.\n]{0,25}$", re.I)
 _SIGN_OFF = re.compile(
     r"\n\s*(kind regards|best regards|warm regards|regards|best wishes|best|many thanks|thanks|"
@@ -98,15 +88,13 @@ def sent_today():
     return Application.objects.filter(status=Status.SENT, sent_at__gte=midnight).count()
 
 
-def missing_setup(markets, need_gmail=True):
-    """What the user still has to do before applications can run with these CVs."""
+def missing_setup(need_gmail=True):
+    """What the user still has to do before applications can run."""
     missing = []
-    for market in markets:
-        profile = Profile.load(market)
-        if not profile.has_resume:
-            missing.append(f"upload your {profile.get_market_display()}")
-        elif not profile.full_name:
-            missing.append(f"add your name to your {profile.get_market_display()}")
+    if not Resume.objects.exists():
+        missing.append("upload your CV")
+    elif not Profile.load().full_name:
+        missing.append("add your name")
     if need_gmail and not mailer.is_configured():
         missing.append("connect Gmail")
     if not llm.api_key():
@@ -123,13 +111,17 @@ def office_wording(text):
     return ""
 
 
-def _rule_problem(market, job_text):
-    """What the posting's own words rule out for this CV, however Gemini read it."""
-    if market == Profile.Market.PAKISTAN:
-        if not _AI_WORK.search(job_text):
-            return "The posting doesn't mention AI or machine learning work"
-        if not (_PAKISTAN_CITIES.search(job_text) or _REMOTE_WORK.search(job_text)):
-            return "The posting doesn't mention Lahore, Islamabad or remote work"
+def split_places(text):
+    return [place.strip() for place in (text or "").split(",") if place.strip()]
+
+
+def _mentions(places, text):
+    return any(re.search(rf"\b{re.escape(place)}\b", text or "", re.I) for place in split_places(places))
+
+
+def _rule_problem(profile, job_text):
+    """What the posting's own words rule out, however Gemini read it. Only places you listed allow office days."""
+    if _mentions(profile.onsite_places, job_text):
         return ""
     office = office_wording(job_text)
     return f'The posting says "{office}"' if office else ""
@@ -137,31 +129,15 @@ def _rule_problem(market, job_text):
 
 def facts(profile):
     """What the user has said about themselves. Until they edit it, the starting text applies."""
-    return profile.facts or prompts.FACTS_TEMPLATES[profile.market]
+    return profile.facts or prompts.FACTS_TEMPLATE
 
 
-def remember_selection(markets):
-    """The "Apply with" ticks stay as they were last used."""
-    for profile in Profile.options():
-        if profile.selected != (profile.market in markets):
-            profile.selected = profile.market in markets
-            profile.save()
+def rules(profile):
+    return prompts.rules(profile.onsite_places, profile.remote_countries)
 
 
-def _cv_options(job_or_crawl):
-    """The CVs ticked for this work that have actually been uploaded."""
-    options = [Profile.load(market) for market in job_or_crawl.markets or [Profile.Market.UK]]
-    return [profile for profile in options if profile.has_resume] or options[:1]
-
-
-def _option(profile, cv_chars=CV_CHARS):
-    return {
-        "id": profile.market,
-        "name": profile.full_name,
-        "cv": profile.resume_text[:cv_chars],
-        "facts": facts(profile),
-        "rules": prompts.RULES[profile.market],
-    }
+def _cv(cv, cv_chars=CV_CHARS):
+    return {"id": str(cv.pk), "cv": cv.text[:cv_chars]}
 
 
 def spawn(fn, *args):
@@ -194,23 +170,28 @@ def recover_interrupted():
 # ---------------------------------------------------------------- CV
 
 
-def save_resume(name, data, market=Profile.Market.UK):
-    """Reads a CV and stores it, without Gemini unless it's a scan. Raises ResumeError with a readable message."""
+def save_resume(name, data):
+    """Reads a CV and stores it, without Gemini unless it's a scan. Raises ResumeError with a readable message.
+    A CV with the same file name replaces the old one. Your details are only filled in where they're blank."""
     text = resume.extract_text(name, data)
     if len(text) < resume.MIN_TEXT and resume.is_pdf(name):
         text = _read_scanned_pdf(data)
     if len(text) < resume.MIN_TEXT:
         raise resume.ResumeError("Couldn't find enough text in that file to read it as a CV.")
+    name = Path(name).name[-200:]  # the end of the name holds the file type
+    cv = Resume.objects.filter(name=name).first()
+    if not cv and Resume.objects.count() >= Resume.MAX_COUNT:
+        raise resume.ResumeError(f"You can keep up to {Resume.MAX_COUNT} CVs. Remove one first.")
+    cv = cv or Resume(name=name)
+    cv.data, cv.text = data, text
+    cv.save()
     details = resume.guess_contact(text)
-    profile = Profile.load(market)
-    profile.resume_name = Path(name).name[-200:]  # the end of the name holds the file type
-    profile.resume_bytes = data
-    profile.resume_text = text
-    profile.full_name = details["full_name"][:120] or profile.full_name
-    profile.phone = details["phone"][:40] or profile.phone
-    profile.linkedin = details["linkedin"][:200] or profile.linkedin
+    profile = Profile.load()
+    profile.full_name = profile.full_name or details["full_name"][:120]
+    profile.phone = profile.phone or details["phone"][:40]
+    profile.linkedin = profile.linkedin or details["linkedin"][:200]
     profile.save()
-    return profile
+    return cv
 
 
 def _read_scanned_pdf(data):
@@ -222,9 +203,9 @@ def _read_scanned_pdf(data):
         raise resume.ResumeError(f"That PDF looks like a scan and Gemini couldn't read it: {exc}") from exc
 
 
-def attachment_name(profile):
+def attachment_name(profile, cv):
     stem = re.sub(r"[^\w-]+", "_", profile.full_name).strip("_") or "Candidate"
-    return f"{stem}_CV{Path(profile.resume_name).suffix.lower()}"
+    return f"{stem}_CV{Path(cv.name).suffix.lower()}"
 
 
 # ---------------------------------------------------------------- Intake
@@ -249,7 +230,7 @@ def _claim(digest, **fields):
     return app, bool(reset)
 
 
-def submit_jd(text, auto_send, markets=None):
+def submit_jd(text, auto_send):
     """Returns (application, is_new). The caller runs process() in the background if new."""
     return _claim(
         source_hash(text),
@@ -257,7 +238,6 @@ def submit_jd(text, auto_send, markets=None):
         jd_text=text[:STORED_JD_CHARS],
         candidates=emails.find_emails(text, exclude=mailer.address()),
         auto_send=auto_send,
-        markets=list(markets or [Profile.Market.UK]),
     )
 
 
@@ -316,10 +296,13 @@ def _check_job(raw, profile):
     return job, ""
 
 
-def _tailor(app, options):
-    """One call, even with two CVs: Gemini picks the better CV and writes the email from it."""
+def _tailor(app, profile, cvs):
+    """One call, however many CVs: Gemini picks the best fit and writes the email from it."""
     base = prompts.tailor_prompt(
-        [_option(profile) for profile in options],
+        profile.full_name,
+        rules(profile),
+        facts(profile),
+        [_cv(cv) for cv in cvs],
         app.jd_text[:JD_CHARS],
         app.candidates,
         timezone.localdate().isoformat(),
@@ -327,10 +310,9 @@ def _tailor(app, options):
     prompt = base
     for _ in range(2):
         raw = llm.generate_json(prompt, prompts.TAILOR_SCHEMA, system=prompts.TAILOR_SYSTEM)
-        chosen = _text(raw.get("cv_id")).lower()
-        profile = next((option for option in options if option.market == chosen), options[0])
+        chosen = _text(raw.get("cv_id"))
         job, problem = _check_job(raw, profile)
-        job["profile"] = profile
+        job["resume"] = next((cv for cv in cvs if str(cv.pk) == chosen), cvs[0])
         if not problem:
             return job
         prompt = f"{base}\n\nYour previous draft was rejected because {problem}. Follow the rules exactly."
@@ -340,40 +322,19 @@ def _tailor(app, options):
     raise llm.LLMError(f"Gemini's draft failed the quality check: {problem}. Click Retry.")
 
 
-def _fails_rules(job, job_text):
-    return job["rules_met"] == "no" or bool(_rule_problem(job["profile"].market, job_text))
-
-
-def _best_cv(app, options):
-    """Gemini picks the CV. If that CV's rules rule the job out, the other CV gets its own look,
-    because Gemini can favour the CV with better skills over the one that's allowed to apply."""
-    job = _tailor(app, options)
-    others = [option for option in options if option != job["profile"]]
-    if others and _fails_rules(job, app.jd_text):
-        try:
-            second = _tailor(app, others)
-        except llm.LLMError as exc:
-            log.warning("Couldn't try the other CV: %s", exc)
-        else:
-            if not _fails_rules(second, app.jd_text):
-                return second
-    return job
-
-
-def _decide(app, job):
+def _decide(app, job, profile):
     """Returns (status, note) for a tailored application."""
     crawled = app.source == Source.CRAWL
     if not job["is_job_posting"]:
         return Status.SKIPPED, "This doesn't look like an open job posting."
-    # The chosen CV's rules hold for pasted jobs too. Only the user pressing Send can overrule them.
-    market = app.profile.market
+    # Your job rules hold for pasted jobs too. Only the user pressing Send can overrule them.
     if job["rules_met"] == "no":
-        return Status.SKIPPED, _RULES_NOT_MET[market]
-    problem = _rule_problem(market, app.jd_text)
+        return Status.SKIPPED, RULES_NOT_MET.format(profile.rule_summary)
+    problem = _rule_problem(profile, app.jd_text)
     if problem:
         return Status.SKIPPED, f"{problem}, so this wasn't applied to."
     if job["rules_met"] != "yes":
-        return Status.SKIPPED, _RULES_UNCLEAR[market]
+        return Status.SKIPPED, RULES_UNCLEAR
     if crawled and job["match_score"] < min_score():
         return Status.SKIPPED, f"Match score {job['match_score']} is below your minimum of {min_score()}."
     if not app.recipient:
@@ -405,8 +366,12 @@ def process(app_id):
     app = Application.objects.get(pk=app_id)
     named = ""
     try:
-        job = _best_cv(app, _cv_options(app))
-        app.profile = job["profile"]
+        cvs = list(Resume.objects.all())
+        if not cvs:
+            raise llm.LLMError("Upload your CV first, then click Retry.")
+        profile = Profile.load()
+        job = _tailor(app, profile, cvs)
+        app.resume = job["resume"]
         app.title = job["title"]
         app.company = job["company"]
         app.location = job["location"]
@@ -420,7 +385,7 @@ def process(app_id):
         named = emails.choose_recipient(app.candidates, job["application_email"], app.jd_text, strict=True)
         crawled = app.source == Source.CRAWL
         app.recipient = named or emails.choose_recipient(app.candidates, "", app.jd_text, strict=crawled)
-        app.status, app.note = _decide(app, job)
+        app.status, app.note = _decide(app, job, profile)
         if job.get("review"):
             app.auto_send = False
             app.status = Status.MANUAL if app.status == Status.FORM_QUEUE else app.status
@@ -469,7 +434,7 @@ def retry(app_id):
 # ---------------------------------------------------------------- Sending
 
 
-def _send_problem(app, profile):
+def _send_problem(app, cv):
     if not app.recipient:
         return "Add a recipient email first."
     try:
@@ -478,8 +443,8 @@ def _send_problem(app, profile):
         return f"{app.recipient} isn't a valid email address."
     if not app.body.strip():
         return "There's no email to send yet."
-    if not profile.has_resume:
-        return "Upload your CV first."
+    if not cv:
+        return "The CV chosen for this job was removed. Click Rewrite with Gemini to pick another."
     if not mailer.is_configured():
         return "Connect Gmail first."
     limit = daily_limit()
@@ -507,8 +472,8 @@ def deliver(app_id):
     with _send_lock:
         app = Application.objects.get(pk=app_id)
         try:
-            profile = app.profile or Profile.load()
-            problem = _send_problem(app, profile)
+            profile, cv = Profile.load(), app.resume
+            problem = _send_problem(app, cv)
             if problem:
                 app.status, app.note = Status.READY, problem
                 app.save()
@@ -518,9 +483,9 @@ def deliver(app_id):
                 subject=app.subject or "Job application",
                 body=app.body,
                 from_name=profile.full_name,
-                attachment_name=attachment_name(profile),
-                attachment=bytes(profile.resume_bytes),
-                mimetype=resume.mimetype(profile.resume_name),
+                attachment_name=attachment_name(profile, cv),
+                attachment=bytes(cv.data),
+                mimetype=resume.mimetype(cv.name),
             )
         except mailer.MailError as exc:
             _fail(app, str(exc))
@@ -578,9 +543,9 @@ def _form_worker():
             _worker_running = False
 
 
-def _form_job(app, profile, submit, stay_open):
+def _form_job(app, profile, cv, submit, stay_open):
     message = app.body
-    stem = attachment_name(profile).split("_CV")[0]
+    stem = attachment_name(profile, cv).split("_CV")[0]
     return formfill.Job(
         url=app.job_url,
         full_name=profile.full_name,
@@ -588,23 +553,21 @@ def _form_job(app, profile, submit, stay_open):
         phone=profile.phone,
         linkedin=profile.linkedin,
         message=message,
-        resume_name=attachment_name(profile),
-        resume_bytes=bytes(profile.resume_bytes),
+        resume_name=attachment_name(profile, cv),
+        resume_bytes=bytes(cv.data),
         cover_name=f"{stem}_Cover_Letter.docx",
         cover_bytes=resume.letter_as_docx(message),
         allow_consent=profile.allow_consent,
         submit=submit,
         stay_open=stay_open,
-        ask=lambda fields: _ask_gemini(app, profile, fields),
+        ask=lambda fields: _ask_gemini(app, profile, cv, fields),
     )
 
 
-def _ask_gemini(app, profile, fields):
+def _ask_gemini(app, profile, cv, fields):
     try:
         raw = llm.generate_json(
-            prompts.form_prompt(
-                profile.full_name, profile.resume_text[:CV_CHARS], facts(profile), app.jd_text[:JD_CHARS], fields
-            ),
+            prompts.form_prompt(profile.full_name, cv.text[:CV_CHARS], facts(profile), app.jd_text[:JD_CHARS], fields),
             prompts.FORM_SCHEMA,
             system=prompts.FORM_SYSTEM,
         )
@@ -627,13 +590,17 @@ def _fill_form(app, chrome):
     if not claimed:
         return
     app.refresh_from_db()
-    profile = app.profile or Profile.load()
+    profile, cv = Profile.load(), app.resume
     # auto_send off means the user pressed the button and is watching: they press Submit themselves.
     under_limit = sent_today() < daily_limit()
     submit = app.auto_send and under_limit
     try:
-        if crawler.Crawler().allowed(app.job_url):
-            outcome = formfill.apply(chrome, _form_job(app, profile, submit, stay_open=not app.auto_send))
+        if not cv:
+            outcome = formfill.Outcome(
+                formfill.NEEDS_YOU, "The CV chosen for this job was removed. Click Rewrite with Gemini to pick another."
+            )
+        elif crawler.Crawler().allowed(app.job_url):
+            outcome = formfill.apply(chrome, _form_job(app, profile, cv, submit, stay_open=not app.auto_send))
         else:
             outcome = formfill.Outcome(
                 formfill.NEEDS_YOU, "This site asks automated tools not to open this page (robots.txt). Open the link yourself."
@@ -682,11 +649,11 @@ def mark_applied(app_id):
 # ---------------------------------------------------------------- Crawling
 
 
-def _job_urls(page, options):
+def _job_urls(page, profile, cvs):
     limit = crawl_max_jobs()
-    remote_only = all(option.market == Profile.Market.UK for option in options)
+    remote_only = not split_places(profile.onsite_places)
     triage = llm.generate_json(
-        prompts.triage_prompt([_option(option, TRIAGE_CHARS) for option in options], page.text[:TRIAGE_CHARS], page.links, limit),
+        prompts.triage_prompt(rules(profile), [_cv(cv, TRIAGE_CHARS) for cv in cvs], page.text[:TRIAGE_CHARS], page.links, limit),
         prompts.TRIAGE_SCHEMA,
         system=prompts.TRIAGE_SYSTEM,
     )
@@ -703,13 +670,13 @@ def _job_urls(page, options):
 
 
 def _crawl(run):
-    options = _cv_options(run)
+    profile, cvs = Profile.load(), list(Resume.objects.all())
     fetcher = crawler.Crawler()
     first_page = fetcher.fetch(run.url)
-    urls = _job_urls(first_page, options)
+    urls = _job_urls(first_page, profile, cvs)
     if not urls:  # some boards only list their jobs once their JavaScript has run
         first_page = fetcher.fetch_rendered(first_page.url)
-        urls = _job_urls(first_page, options)
+        urls = _job_urls(first_page, profile, cvs)
     if not urls:
         run.status = CrawlRun.Status.DONE
         run.note = f"Found no matching jobs on that page. If it needs a login, try another link. {crawler.PASTE_INSTEAD}"
@@ -726,7 +693,6 @@ def _crawl(run):
             crawl=run,
             job_url=url[:2000],
             auto_send=run.auto_send,
-            markets=run.markets,
             jd_text="",
             candidates=[],
         )

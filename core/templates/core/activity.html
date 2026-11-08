@@ -32,7 +32,7 @@
         <td>
           <a href="{% url 'detail' app.pk %}" target="_top">{{ app.title|default:app.job_url|default:"Pasted job"|truncatechars:80 }}</a>
           {% if app.company %}<span class="muted">at {{ app.company }}</span>{% endif %}
-          {% if app.profile %}<span class="small muted">({{ app.profile.get_market_display }})</span>{% endif %}
+          {% if app.resume %}<span class="small muted">({{ app.resume.name }})</span>{% endif %}
           {% if app.note %}<div class="small muted">{{ app.note }}</div>{% endif %}
         </td>
         <td class="num">{{ app.score|default_if_none:"" }}</td>

@@ -1,6 +1,6 @@
 # Job Finder
 
-A local Django dashboard that automates job applications: it reads job adverts and job boards, scores each job against your CV with Gemini, writes a tailored application and sends it by email or through the employer's website form.
+A local Django dashboard that automates job applications: it reads job adverts and job boards, scores each job against your CVs with Gemini, writes a tailored application and sends it by email or through the employer's website form.
 It saves hours of repetitive applying, while hard-coded rules stop it applying to jobs that don't fit or guessing answers it doesn't know.
 
 ## How it works
@@ -10,7 +10,7 @@ flowchart TD
     A["Pasted job description"] --> C
     B["Job board or careers link"] --> T["Crawl the page and shortlist jobs"]
     T --> C["Gemini picks the best CV, scores the job and writes the application"]
-    C --> R{"Meets that CV's rules?"}
+    C --> R{"Meets your job rules?"}
     R -- No --> S["Skip, with the reason"]
     R -- Yes --> E{"Application email in the posting?"}
     E -- Yes --> M["Send through Gmail with the CV attached"]
@@ -26,14 +26,14 @@ flowchart TD
 | Layer | Technology | How it's used |
 | --- | --- | --- |
 | Web app | Python 3.10+, Django 5.2 | Server-rendered templates with CSRF protection and host validation. No front-end JavaScript: live progress uses an iframe that refreshes itself. |
-| Data | SQLite, Django ORM | CV profiles, applications and crawl runs, with versioned migrations and atomic status changes. |
+| Data | SQLite, Django ORM | Your details, CVs, applications and crawl runs, with versioned migrations and atomic status changes. |
 | AI | Gemini REST API | Structured JSON through response schemas, automatic fallback to a second model, and capped timeouts and retries. |
 | Crawling | requests, BeautifulSoup | Honours robots.txt, limits request rate and download size, and reads schema.org JobPosting data. |
 | Browser automation | Playwright, Chrome | Reads forms with injected JavaScript, including iframes and React-style dropdowns, and renders pages that need JavaScript. |
 | Documents | pypdf, python-docx | Extracts CV text locally. Gemini reads scanned PDFs. |
 | Email | Django mail, Gmail SMTP over SSL | Sends the tailored message with the CV attached, using an App Password. |
 | Background work | Python threads | Crawling, tailoring, sending and form filling run off the request thread. One worker owns the browser, and interrupted work is recovered on restart. |
-| Testing | Django test runner, headless Chrome | 459 tests, including real-browser runs against a local fake job site and deliberately hostile pages. |
+| Testing | Django test runner, headless Chrome | 434 tests, including real-browser runs against a local fake job site and deliberately hostile pages. |
 
 ## Project layout
 
@@ -70,6 +70,17 @@ cd job-finder
 ```
 
 This creates the virtual environment, installs dependencies, creates `.env` from `.env.example` and runs migrations. The dashboard is at http://127.0.0.1:8765, and it opens by itself on macOS.
+
+## Your CVs and job rules
+
+Upload one CV for each kind of work you do, such as business development and WordPress, all at once. For every job, Gemini picks the CV that fits it best and writes the email from it. Your name, contact details and facts are entered once and shared by all your CVs.
+
+Job rules are set in the dashboard under "Where you'll work", so anyone can use it:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| On-site, hybrid or remote are all fine in | `Pakistan, Lahore, Islamabad, Karachi, Rawalpindi` | Jobs that mention one of these places can be on-site, hybrid or remote. Leave it empty to apply to remote jobs only. |
+| Anywhere else, fully remote jobs from | `United Kingdom, United States` | Everywhere else, only fully remote jobs from these countries. Leave it empty for any country. |
 
 ## Configuration
 

@@ -8,7 +8,7 @@ from django.urls import reverse
 
 from core import formfill, llm, pipeline, prompts
 from core.crawler import Page
-from core.models import Application, CrawlRun, Profile
+from core.models import Application, CrawlRun, Profile, Resume
 from core.tests.base import CV_TEXT, AppTestCase, RealBrowserTestCase, gemini_job
 from core.tests.fake_site import FakeSite
 from core.tests.test_formfill import chrome_available
@@ -35,6 +35,7 @@ class FlowMixin:
             "job_url": "https://board.example/jobs/1",
             "jd_text": "A remote developer job.",
             "auto_send": True,
+            "resume": Resume.objects.first(),
         }
         values.update(fields)
         return Application.objects.create(**values)
@@ -192,7 +193,7 @@ class AskGeminiTests(FlowTestCase):
         Profile.objects.filter(pk=1).update(facts="I live in Karachi.")
         answer = {"answers": [{"id": "f1", "values": ["Northwind"], "source": "CV"}]}
         with mock.patch("core.llm.generate_json", return_value=answer) as generate:
-            replies = pipeline._ask_gemini(self.app(), Profile.load(), [self.FIELD])
+            replies = pipeline._ask_gemini(self.app(), Profile.load(), self.cv, [self.FIELD])
         prompt = generate.call_args.args[0]
         self.assertIn("I live in Karachi.", prompt)
         self.assertIn(CV_TEXT.strip()[:50], prompt)
@@ -203,12 +204,12 @@ class AskGeminiTests(FlowTestCase):
     def test_failure_becomes_a_form_error(self):
         with mock.patch("core.llm.generate_json", side_effect=llm.LLMError("quota")):
             with self.assertRaisesMessage(formfill.FormError, "quota"):
-                pipeline._ask_gemini(self.app(), Profile.load(), [self.FIELD])
+                pipeline._ask_gemini(self.app(), Profile.load(), self.cv, [self.FIELD])
 
     def test_odd_answers_cant_crash_it(self):
         for raw in ({}, {"answers": None}, {"answers": ["x"]}, {"answers": [{"id": "f1", "values": "text"}]}):
             with self.subTest(raw), mock.patch("core.llm.generate_json", return_value=raw):
-                self.assertEqual(pipeline._ask_gemini(self.app(), Profile.load(), [self.FIELD]), {})
+                self.assertEqual(pipeline._ask_gemini(self.app(), Profile.load(), self.cv, [self.FIELD]), {})
 
 
 class WorkerTests(FlowTestCase):
