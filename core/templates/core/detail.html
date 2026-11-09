@@ -15,20 +15,24 @@
       <span class="chip status-{{ app.status }}">{{ app.get_status_display }}</span>
       {% if app.score is not None %}<span>Match <strong class="num">{{ app.score }}</strong></span>{% endif %}
       {% if app.resume %}<span>Using {{ app.resume.name }}</span>{% endif %}
+      {% if app.open_to %}<span>{{ app.open_to }}</span>{% endif %}
       {% if app.rules_met %}<span>Meets your job rules: {{ app.rules_met }}</span>{% endif %}
       {% if app.location %}<span>{{ app.location }}</span>{% endif %}
       {% if app.job_url %}<a href="{{ app.job_url }}" target="_blank" rel="noopener noreferrer">Open job posting</a>{% endif %}
     </div>
 
     {% if app.note %}
-      <div class="notice {% if app.status == 'failed' %}error{% else %}warn{% endif %}">{{ app.note }}</div>
+      <div class="notice {% if app.status == 'failed' %}error{% else %}warn{% endif %}">{{ app.note }}{% if was_sending %} It was going out from {{ app.sender }}.{% endif %}</div>
     {% endif %}
     {% if app.reason %}<p>{{ app.reason }}</p>{% endif %}
+    {% if related %}
+      <p class="small muted">The same job with your other CVs: {% for other in related %}<a href="{% url 'detail' other.pk %}">{{ other.resume.name|default:"a removed CV" }}</a> ({{ other.get_status_display|lower }}){% if not forloop.last %}, {% endif %}{% endfor %}</p>
+    {% endif %}
 
     {% if app.status == "sent" and app.channel == "form" %}
       <p class="small muted">Submitted through the website form on {{ app.sent_at|date:"j M Y, H:i" }}.</p>
     {% elif app.status == "sent" %}
-      <p class="small muted">Sent {{ app.sent_at|date:"j M Y, H:i" }} to {{ app.recipient }}, with your CV attached.</p>
+      <p class="small muted">Sent {{ app.sent_at|date:"j M Y, H:i" }} to {{ app.recipient }}{% if app.sender %} from {{ app.sender }}{% endif %}, with your CV attached.</p>
       <h3>{{ app.subject }}</h3>
       <div class="sent-body">{{ app.body }}</div>
     {% elif app.in_flight %}
@@ -42,7 +46,7 @@
         <input id="subject" type="text" name="subject" value="{{ app.subject }}" maxlength="300" required>
         <label for="body">Message</label>
         <textarea id="body" name="body" rows="16" required>{{ app.body }}</textarea>
-        {% if attachment %}<p class="small muted" style="margin-top:8px">Attachment: {{ attachment }}</p>{% endif %}
+        {% if attachment %}<p class="small muted" style="margin-top:8px">Attachment: {{ attachment }}{% if sends_from %}. Sends from {{ sends_from }}{% endif %}</p>{% endif %}
         <div class="actions"><button type="submit">Send now</button></div>
       </form>
     {% endif %}

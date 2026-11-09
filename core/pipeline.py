@@ -9,9 +9,10 @@ from pathlib import Path
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import connections
+from django.db.models import Q
 from django.utils import timezone
 
-from . import crawler, emails, formfill, llm, mailer, prompts, resume
+from . import countries, crawler, emails, formfill, llm, mailer, prompts, resume
 from .models import IN_FLIGHT, Application, CrawlRun, Profile, Resume
 
 log = logging.getLogger(__name__)
@@ -56,8 +57,9 @@ _OFFICE_WORK = re.compile(
 RULES_NOT_MET = "Doesn't meet your job rules ({}), so this wasn't applied to."
 RULES_UNCLEAR = "The posting doesn't say where or how the work is done, so this wasn't applied to."
 _RULED_OUT = re.compile(r"\b(not|no|non|never|without|isn't|aren't|can be|could be|may be)\b[^.\n]{0,25}$", re.I)
+# A sign-off on a line of its own, or after the last sentence on its line: "...your team. Best regards,"
 _SIGN_OFF = re.compile(
-    r"\n\s*(kind regards|best regards|warm regards|regards|best wishes|best|many thanks|thanks|"
+    r"(?:\n\s*|(?<=[.!?])[ \t]+)(kind regards|best regards|warm regards|regards|best wishes|best|many thanks|thanks|"
     r"thank you|sincerely|yours sincerely|yours faithfully|cheers)\s*[,.!]?\s*(\n[^\n]{0,80}){0,5}\s*$",
     re.I,
 )
@@ -91,10 +93,11 @@ def sent_today():
 def missing_setup(need_gmail=True):
     """What the user still has to do before applications can run."""
     missing = []
+    unnamed = Resume.objects.filter(full_name="").values_list("name", flat=True).first()
     if not Resume.objects.exists():
         missing.append("upload your CV")
-    elif not Profile.load().full_name:
-        missing.append("add your name")
+    elif unnamed:
+        missing.append(f"add your name to {unnamed}")
     if need_gmail and not mailer.is_configured():
         missing.append("connect Gmail")
     if not llm.api_key():
@@ -127,9 +130,25 @@ def _rule_problem(profile, job_text):
     return f'The posting says "{office}"' if office else ""
 
 
-def facts(profile):
-    """What the user has said about themselves. Until they edit it, the starting text applies."""
-    return profile.facts or prompts.FACTS_TEMPLATE
+def facts(cv):
+    """What the user has said about themselves for jobs that get this CV. Until they edit it, the starting text applies."""
+    return cv.facts or prompts.FACTS_TEMPLATE
+
+
+def own_addresses():
+    """Your Gmail accounts and every CV's email address. None of them is ever a recipient."""
+    return [*mailer.accounts(), *Resume.objects.exclude(email="").values_list("email", flat=True)]
+
+
+def sender(cv):
+    """The connected Gmail account this CV's emails go out from: the one chosen for it in Setup, else the one with the
+    CV's own address, else your only account. With several and none of those, "" rather than another CV's Gmail."""
+    accounts = mailer.accounts()
+    return mailer.account(cv.send_from) or mailer.account(cv.email) or (accounts[0] if len(accounts) == 1 else "")
+
+
+def spelling(cv):
+    return "US English" if countries.same(cv.country, "United States") else "UK English"
 
 
 def rules(profile):
@@ -137,7 +156,7 @@ def rules(profile):
 
 
 def _cv(cv, cv_chars=CV_CHARS):
-    return {"id": str(cv.pk), "cv": cv.text[:cv_chars]}
+    return {"id": str(cv.pk), "name": cv.full_name, "country": cv.country, "cv": cv.text[:cv_chars], "facts": facts(cv)}
 
 
 def spawn(fn, *args):
@@ -171,8 +190,9 @@ def recover_interrupted():
 
 
 def save_resume(name, data):
-    """Reads a CV and stores it, without Gemini unless it's a scan. Raises ResumeError with a readable message.
-    A CV with the same file name replaces the old one. Your details are only filled in where they're blank."""
+    """Reads a CV and stores it with who it says you are: name, email, phone, LinkedIn, links and country. No Gemini
+    unless it's a scan. Raises ResumeError with a readable message. A CV with the same file name replaces the old
+    one, keeping its facts, its Gmail account and anything you typed, and cv.replaced says so."""
     text = resume.extract_text(name, data)
     if len(text) < resume.MIN_TEXT and resume.is_pdf(name):
         text = _read_scanned_pdf(data)
@@ -182,16 +202,25 @@ def save_resume(name, data):
     cv = Resume.objects.filter(name=name).first()
     if not cv and Resume.objects.count() >= Resume.MAX_COUNT:
         raise resume.ResumeError(f"You can keep up to {Resume.MAX_COUNT} CVs. Remove one first.")
+    found = resume.contact_details(name, data, text)
+    keep = dict.fromkeys(_SIZES, False)
+    if cv:  # a new version: a detail you typed or cleared stays, and one the old file gave makes way
+        before = resume.contact_details(cv.name, bytes(cv.data), cv.text)
+        keep = {key: getattr(cv, key) != before[key][:size] for key, size in _SIZES.items()}
+    old = {key: getattr(cv, key) for key in ("full_name", "phone", "linkedin")} if cv else None
     cv = cv or Resume(name=name)
+    cv.replaced = old is not None
     cv.data, cv.text = data, text
+    for key, size in _SIZES.items():  # jobs that get this CV go out with its own details
+        if not keep[key]:
+            setattr(cv, key, found[key][:size])
     cv.save()
-    details = resume.guess_contact(text)
-    profile = Profile.load()
-    profile.full_name = profile.full_name or details["full_name"][:120]
-    profile.phone = profile.phone or details["phone"][:40]
-    profile.linkedin = profile.linkedin or details["linkedin"][:200]
-    profile.save()
+    if old:
+        resign_drafts(cv, old["full_name"], old["phone"], old["linkedin"])
     return cv
+
+
+_SIZES = {"full_name": 120, "email": 254, "phone": 40, "linkedin": 200, "links": 10_000, "country": 60}
 
 
 def _read_scanned_pdf(data):
@@ -203,8 +232,8 @@ def _read_scanned_pdf(data):
         raise resume.ResumeError(f"That PDF looks like a scan and Gemini couldn't read it: {exc}") from exc
 
 
-def attachment_name(profile, cv):
-    stem = re.sub(r"[^\w-]+", "_", profile.full_name).strip("_") or "Candidate"
+def attachment_name(cv):
+    stem = re.sub(r"[^\w-]+", "_", cv.full_name).strip("_") or "Candidate"
     return f"{stem}_CV{Path(cv.name).suffix.lower()}"
 
 
@@ -236,7 +265,7 @@ def submit_jd(text, auto_send):
         source_hash(text),
         source=Source.PASTE,
         jd_text=text[:STORED_JD_CHARS],
-        candidates=emails.find_emails(text, exclude=mailer.address()),
+        candidates=emails.find_emails(text, exclude=own_addresses()),
         auto_send=auto_send,
     )
 
@@ -252,19 +281,64 @@ def _text(value):
 def _clean_body(body, name):
     body = body.replace("\r\n", "\n").replace("**", "").strip()
     body = re.sub(r"\n\s*\n", "\n\n", body)
-    body = _SIGN_OFF.sub("", body).rstrip()
-    if name and body.lower().endswith(name.lower()):
-        body = body[: -len(name)].rstrip(" ,\n")
+    for _ in range(2):  # the name can come after the sign-off on its own line: "Best regards, Sam Taylor"
+        body = _SIGN_OFF.sub("", body).rstrip()
+        if name and body.lower().endswith(name.lower()):
+            body = body[: -len(name)].rstrip(" ,\n")
     return body
 
 
-def _signature(profile):
-    contact = " | ".join(part for part in (profile.phone, profile.linkedin) if part)
-    return "\n".join(line for line in ("Kind regards,", profile.full_name, contact) if line)
+def _contact(phone, linkedin):
+    return " | ".join(part for part in (phone, linkedin) if part)
 
 
-def _check_job(raw, profile):
-    """Coerces Gemini's answer into safe values. Returns (job, problem)."""
+def _sign(name, phone, linkedin):
+    return "\n".join(line for line in ("Kind regards,", name, _contact(phone, linkedin)) if line)
+
+
+def _signature(cv):
+    return _sign(cv.full_name, cv.phone, cv.linkedin)
+
+
+def resign_drafts(cv, old_name, old_phone, old_linkedin):
+    """Emails not yet sent with this CV were signed with its old name, phone and LinkedIn, so they take the new ones,
+    unless you've changed how a draft ends. A draft you signed with another name keeps it, a draft written while the
+    CV had no name gets one, and a subject ending in the old name, as the app writes them, takes the new one. A draft
+    already typed into a website form is left as it went. Returns how many changed."""
+    old, new = _contact(old_phone, old_linkedin), _contact(cv.phone, cv.linkedin)
+    renamed = bool(cv.full_name) and old_name != cv.full_name
+    if old == new and not renamed:
+        return 0
+    ending = re.compile(r"\n\nKind regards,(?:\n([^\n]+))?" + (re.escape(f"\n{old}") if old else "") + r"\Z")
+    done = [Status.SENT, Status.SENDING, Status.FILLING]  # on their way out, or gone: what was sent stays on record
+    changed = 0
+    drafts = (
+        Application.objects.filter(resume=cv, form_answers=[])  # once a form is filled in, the message is in it
+        .exclude(status__in=done)
+        .exclude(note__in=[INTERRUPTED_SEND, INTERRUPTED_FORM, *formfill.MAYBE_SUBMITTED])  # may have gone out as they are
+        .only("pk", "body", "subject")
+    )
+    for app in drafts:
+        match = ending.search(app.body)
+        if not match:
+            continue
+        signed_as = match.group(1) or ""
+        name = cv.full_name if renamed and signed_as == old_name else signed_as
+        body = f"{app.body[: match.start()]}\n\n{_sign(name, cv.phone, cv.linkedin)}"
+        subject = app.subject
+        if renamed and name == cv.full_name and re.search(rf" -\s*{re.escape(old_name)}$", subject):
+            subject = re.sub(rf" -\s*{re.escape(old_name)}$", f" - {cv.full_name}", subject)[:300]
+        if (body, subject) != (app.body, app.subject):
+            changed += (
+                Application.objects.filter(pk=app.pk, body=app.body, subject=app.subject)
+                .exclude(status__in=done)
+                .update(body=body, subject=subject)
+            )
+    return changed
+
+
+def _check_job(raw, cv):
+    """Coerces Gemini's answer into safe values, signed with the chosen CV's details. Returns (job, problem)."""
     try:
         score = max(0, min(100, int(raw.get("match_score"))))
     except (TypeError, ValueError):
@@ -281,7 +355,7 @@ def _check_job(raw, profile):
         "application_email": _text(raw.get("application_email")),
     }
     subject = " ".join(_text(raw.get("subject")).split())[:300]
-    body = _clean_body(_text(raw.get("body")), profile.full_name)
+    body = _clean_body(_text(raw.get("body")), cv.full_name)
     placeholder = _PLACEHOLDER.search(body) or _PLACEHOLDER.search(subject)
     too_short = len(body.split()) < MIN_BODY_WORDS
     if not job["is_job_posting"] and (too_short or placeholder):
@@ -289,33 +363,133 @@ def _check_job(raw, profile):
         return job, ""
     if too_short:
         return job, "the email was too short"
-    fallback = f"Application for {job['title'] or 'your vacancy'} - {profile.full_name}"
-    job.update(subject=subject or fallback[:300], body=f"{body}\n\n{_signature(profile)}")
+    fallback = f"Application for {job['title'] or 'your vacancy'} - {cv.full_name}"
+    job.update(subject=subject or fallback[:300], body=f"{body}\n\n{_signature(cv)}")
     if placeholder:
         return job, f'the email contains what looks like a placeholder: "{placeholder.group()}"'
     return job, ""
 
 
-def _tailor(app, profile, cvs):
-    """One call, however many CVs: Gemini picks the best fit and writes the email from it."""
-    base = prompts.tailor_prompt(
-        profile.full_name,
-        rules(profile),
-        facts(profile),
-        [_cv(cv) for cv in cvs],
-        app.jd_text[:JD_CHARS],
-        app.candidates,
-        timezone.localdate().isoformat(),
-    )
-    prompt = base
-    for _ in range(2):
-        raw = llm.generate_json(prompt, prompts.TAILOR_SCHEMA, system=prompts.TAILOR_SYSTEM)
-        chosen = _text(raw.get("cv_id"))
-        job, problem = _check_job(raw, profile)
-        job["resume"] = next((cv for cv in cvs if str(cv.pk) == chosen), cvs[0])
-        if not problem:
-            return job
-        prompt = f"{base}\n\nYour previous draft was rejected because {problem}. Follow the rules exactly."
+def _reach(raw, cvs, job_text, onsite_places):
+    """Which CVs a job may go out with. Gemini reads the posting, but the code decides.
+
+    - A job that isn't clearly fully remote only goes with a CV for a country where your rules allow on-site work,
+      and is turned down if it's anywhere else.
+    - A remote job limited to some countries only goes with a CV for one of them, and waits for you if there's none.
+    - A remote job the posting opens to anyone anywhere may go with any CV, and with one per country, unless the
+      employer is in a country where your rules allow on-site work: then only that country's CVs, as for its office.
+    - Otherwise the CV for the employer's country if you have one, else the best match.
+
+    CVs without a country only stand in when none of your CVs has one. Returns allowed (CVs, in your order), scores
+    ({pk: match score}), several (more than one may go), remote, anywhere, label (where it's open to, for the page),
+    refuse and hold (notes for turning it down or waiting for you, or "")."""
+    setup = _text(raw.get("work_setup")).lower()
+    remote = "remote" in setup and not re.search(r"hybrid|on-?site|office", setup) and not office_wording(job_text)
+    limited = raw.get("limited_to") if isinstance(raw.get("limited_to"), list) else []
+    limited = list(dict.fromkeys(country for name in limited for country in countries.resolve(_text(name))))
+    location = _text(raw.get("location"))
+    employer_in = countries.resolve(_text(raw.get("based_in")))
+    based = employer_in[0] if len(employer_in) == 1 else countries.only_place(location)
+    onsite = list(dict.fromkeys(countries.canonical(place) for place in split_places(onsite_places)))
+    onsite_keys = {countries.key(place) for place in onsite}
+
+    def cvs_for(places):
+        keys = {countries.key(place) for place in places}
+        return [cv for cv in cvs if cv.country and countries.key(cv.country) in keys]
+
+    anywhere = remote and raw.get("open_to_anywhere") is True and not limited
+    employer = f"with an employer in {based}" if based else ""
+    refuse = hold = ""
+    if anywhere and based and countries.key(based) in onsite_keys and cvs_for([based]):
+        label, pool = f"Open to people anywhere, {employer}", cvs_for([based])  # that country's job, as for its office
+        anywhere = False
+    elif not remote:  # it's open where it is
+        where = list(dict.fromkeys(country for _, country in countries.places(location)))
+        place = limited or where or ([based] if based else []) or [place for place in onsite if _mentions(place, job_text)]
+        inside = [name for name in place if countries.key(name) in onsite_keys]
+        label = f"In person in {', '.join(place)}" if place else "In person"
+        if place and not inside:
+            allowed_in = f", but your rules only allow on-site or hybrid work in {onsite_places}" if onsite_places else ""
+            refuse = f"This job isn't fully remote and is in {', '.join(place)}{allowed_in}, so this wasn't applied to."
+        pool = cvs_for(inside or onsite)
+        if not pool and any(cv.country for cv in cvs) and not refuse:
+            there = ", ".join(inside or onsite) or "a place your rules allow"
+            hold = f"This job is in person in {there}, and none of your CVs is for there, so it waits for you."
+    elif limited:
+        label, pool = f"Open to people in {', '.join(limited)}", cvs_for(limited)
+        if not pool and any(cv.country for cv in cvs):
+            hold = f"This job is only open to people in {', '.join(limited)}, and none of your CVs is for there, so it waits for you."
+    elif anywhere:
+        label, pool = "Open to people anywhere", list(cvs)
+    else:
+        label, pool = f"Remote, {employer or 'with no stated limit'}", cvs_for([based]) or list(cvs)
+    if not pool:  # you don't sort your CVs by country, or the job waits for you: any may draft it
+        pool = list(cvs)
+    scores = {}
+    for entry in raw.get("cv_scores") if isinstance(raw.get("cv_scores"), list) else []:
+        try:
+            scores[_text(entry.get("cv_id"))] = max(0, min(100, int(entry.get("match_score"))))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return {
+        "allowed": pool,
+        "scores": {cv.pk: scores.get(str(cv.pk), 0) for cv in cvs},
+        "several": anywhere and len({countries.key(cv.country) for cv in pool if cv.country}) > 1,
+        "remote": remote,
+        "anywhere": anywhere,
+        "label": label[:300],
+        "refuse": refuse,
+        "hold": hold,
+    }
+
+
+def _tailor(app, profile, cvs, fixed=False):
+    """Gemini reads where the job is open to and how well each CV fits, and writes the email from the CV it picks.
+    The job gets the best-scoring CV it may go with, and if that isn't the one Gemini wrote from, the email is written
+    again with only that CV in front of it. fixed: cvs is the one CV a further application keeps, and where the job
+    is open to is judged against all your CVs, as it was for the first."""
+
+    def ask(options, problem=""):
+        prompt = prompts.tailor_prompt(
+            rules(profile),
+            [_cv(cv) for cv in options],
+            app.jd_text[:JD_CHARS],
+            app.candidates,
+            timezone.localdate().isoformat(),
+        )
+        if problem:
+            prompt += f"\n\nYour previous draft was rejected because {problem}. Follow the rules exactly."
+        return llm.generate_json(prompt, prompts.TAILOR_SCHEMA, system=prompts.TAILOR_SYSTEM)
+
+    def rewritten(again):  # where the job is open to and whether it fits the rules stay as first read
+        return {**first, **{key: again.get(key) for key in ("match_score", "reason", "subject", "body")}}
+
+    raw = first = ask(cvs)
+    reach = _reach(raw, list(Resume.objects.all()) if fixed else cvs, app.jd_text, profile.onsite_places)
+    picked = next((cv for cv in cvs if str(cv.pk) == _text(raw.get("cv_id"))), None)
+    doomed = raw.get("is_job_posting") is not True or re.match(r"no\b", _text(raw.get("rules_met")).lower())
+    if fixed or len(cvs) == 1:
+        cv = cvs[0]
+    else:
+        best = max(reach["scores"][cv.pk] for cv in reach["allowed"])
+        leaders = [cv for cv in reach["allowed"] if reach["scores"][cv.pk] == best]
+        cv = picked if picked in leaders else leaders[0]  # the best-scoring CV the job may get, Gemini's pick on a tie
+        if reach["refuse"] or doomed:
+            cv = picked or cv  # it won't be applied to, so it isn't written again
+        elif cv != picked:  # its email was written from another CV, so it's written again from this one
+            raw = rewritten(ask([cv]))
+    for attempt in range(2):
+        try:  # you may have changed its details while Gemini was writing
+            cv.refresh_from_db(fields=["full_name", "phone", "linkedin"])
+        except Resume.DoesNotExist:
+            raise llm.LLMError("The CV chosen for this job was removed while it was being written. Click Retry.") from None
+        job, problem = _check_job(raw, cv)
+        if not problem or attempt:
+            break
+        raw = rewritten(ask([cv], problem))
+    job.update(resume=cv, reach=reach)
+    if not problem:
+        return job
     if job.get("body"):  # a flagged draft is still worth keeping, but it waits for the user
         job["review"] = f"Please check this draft: {problem}."
         return job
@@ -333,27 +507,43 @@ def _decide(app, job, profile):
     problem = _rule_problem(profile, app.jd_text)
     if problem:
         return Status.SKIPPED, f"{problem}, so this wasn't applied to."
+    if job["reach"]["refuse"]:
+        return Status.SKIPPED, job["reach"]["refuse"]
+    if app.parent_id and not _still_fits(job):
+        country = job["resume"].country or "no particular country"
+        return Status.SKIPPED, f"Read again, this job only takes one CV, so the one for {country} wasn't sent."
     if job["rules_met"] != "yes":
         return Status.SKIPPED, RULES_UNCLEAR
-    if crawled and job["match_score"] < min_score():
+    if (crawled or app.parent_id) and job["match_score"] < min_score():  # a further CV must earn its place too
         return Status.SKIPPED, f"Match score {job['match_score']} is below your minimum of {min_score()}."
+    group = app.parent_id or app.pk  # this job's other CVs went on purpose
+    sent_before = (  # the same job: the same reach too, as a job open to other places is another job
+        Application.objects.filter(status=Status.SENT, title__iexact=app.title)
+        .filter(Q(open_to="") | Q(open_to=app.open_to))
+        .exclude(pk__in=[app.pk, group])
+        .exclude(parent_id=group)
+    )
     if not app.recipient:
+        earlier = sent_before.filter(company__iexact=app.company).first() if crawled and app.title and app.company else None
+        if earlier:  # the same job found again under another link
+            when = timezone.localtime(earlier.sent_at).strftime("%-d %b %Y")
+            return Status.SKIPPED, f"You already applied to {app.company} for this role on {when}."
         if crawled and app.auto_send:
             return Status.FORM_QUEUE, ""
         if crawled:
             return Status.MANUAL, "This posting has no application email. Fill the form, or open the link and use the message below."
         return Status.READY, "No application email found. Add one below."
-    earlier = (
-        Application.objects.filter(status=Status.SENT, recipient__iexact=app.recipient, title__iexact=app.title)
-        .exclude(pk=app.pk)
-        .first()
-        if app.title
-        else None
-    )
+    earlier = sent_before.filter(recipient__iexact=app.recipient).first() if app.title else None
     if earlier:
         when = timezone.localtime(earlier.sent_at).strftime("%-d %b %Y")
         return Status.SKIPPED, f"You already applied to {app.recipient} for this role on {when}."
     return Status.READY, ""
+
+
+def _still_fits(job):
+    """A further CV goes only while, read again, the job still takes a CV per country and this one is among them."""
+    reach = job["reach"]
+    return reach["several"] and job["resume"] in reach["allowed"]
 
 
 def process(app_id):
@@ -364,13 +554,28 @@ def process(app_id):
     if not claimed:
         return
     app = Application.objects.get(pk=app_id)
-    named = ""
+    named, job, auto_send = "", None, app.auto_send
     try:
-        cvs = list(Resume.objects.all())
-        if not cvs:
-            raise llm.LLMError("Upload your CV first, then click Retry.")
         profile = Profile.load()
-        job = _tailor(app, profile, cvs)
+        if app.parent_id:  # a further CV for a job keeps that CV
+            if not app.resume:
+                raise llm.LLMError("The CV for this application was removed.")
+            if app.parent and app.parent.resume_id == app.resume_id:
+                raise llm.LLMError("The first application for this job now uses this CV, so this one isn't needed.")
+            job = _tailor(app, profile, [app.resume], fixed=True)
+        else:
+            cvs = list(Resume.objects.all())
+            if not cvs:
+                raise llm.LLMError("Upload your CV first, then click Retry.")
+            taken = set(app.extras.exclude(status=Status.SKIPPED).values_list("resume", flat=True))
+            cvs = [cv for cv in cvs if cv.pk not in taken]  # never two applications with one CV
+            if not cvs:
+                raise llm.LLMError("Each of your CVs already has an application for this job.")
+            job = _tailor(app, profile, cvs)
+            app.open_to = job["reach"]["label"]
+            app.extras.filter(resume=job["resume"], status=Status.SKIPPED).update(
+                note="The first application for this job now uses this CV, so this one isn't needed."
+            )
         app.resume = job["resume"]
         app.title = job["title"]
         app.company = job["company"]
@@ -380,18 +585,27 @@ def process(app_id):
         app.reason = job["reason"]
         app.subject = job["subject"]
         app.body = job["body"]
-        # Only an address Gemini names goes out by itself. On a pasted job the best guess is
-        # filled in for review, because the only address may be a footer's privacy contact.
-        named = emails.choose_recipient(app.candidates, job["application_email"], app.jd_text, strict=True)
-        crawled = app.source == Source.CRAWL
-        app.recipient = named or emails.choose_recipient(app.candidates, "", app.jd_text, strict=crawled)
+        if app.parent_id:  # a further CV goes where the first did, never to an address of its own choosing
+            named = app.recipient if app.auto_send else ""
+        else:
+            # Only an address Gemini names goes out by itself. On a pasted job the best guess is
+            # filled in for review, because the only address may be a footer's privacy contact.
+            named = emails.choose_recipient(app.candidates, job["application_email"], app.jd_text, strict=True)
+            crawled = app.source == Source.CRAWL
+            app.recipient = named or emails.choose_recipient(app.candidates, "", app.jd_text, strict=crawled)
         app.status, app.note = _decide(app, job, profile)
-        if job.get("review"):
+        held = job["reach"]["hold"] if app.status in (Status.READY, Status.FORM_QUEUE, Status.MANUAL) else ""
+        if job.get("review") or held:
             app.auto_send = False
             app.status = Status.MANUAL if app.status == Status.FORM_QUEUE else app.status
-            app.note = f"{app.note} {job['review']}".strip()
+            app.note = " ".join(part for part in (held, app.note, job.get("review", "")) if part)
         elif app.status == Status.READY and app.auto_send and app.recipient and not named:
             app.note = UNCONFIRMED_ADDRESS
+        elif app.parent_id and app.status == Status.READY and not app.auto_send and not app.note:
+            if app.parent and app.parent.status == Status.SENT:
+                app.note = "Drafted for you to check. Click Send when you're happy with it."
+            else:
+                app.note = "The first application for this job waits for you, so this one does too. Check it, then click Send."
         app.save()
     except llm.LLMError as exc:
         _fail(app, str(exc))
@@ -404,6 +618,80 @@ def process(app_id):
         send_application(app.pk)
     elif app.status == Status.FORM_QUEUE:
         ensure_form_worker()
+    if not app.parent_id and app.status not in (Status.SKIPPED, Status.FAILED):
+        # the others go by themselves only if this one did: to an address Gemini confirmed, or through the site's form
+        went = auto_send and not job["reach"]["hold"] and (bool(named) or app.status == Status.FORM_QUEUE)
+        try:
+            _apply_with_other_cvs(app, job, profile, went)
+        except Exception:  # a CV removed meanwhile, say: this one is done, and a crawl goes on
+            log.exception("Applying to job %s with your other CVs failed", app_id)
+
+
+def _addresses(cv):
+    """The addresses an application with this CV goes out under: its own, and the Gmail account it sends from."""
+    return {emails.mailbox(address) for address in (cv.email, sender(cv)) if address}
+
+
+def _apply_with_other_cvs(app, job, profile, auto_send):
+    """A remote job the posting opens to people anywhere also gets the best CV of each of your other countries, as a
+    separate application, if it scores at least your minimum. Never twice from one address or with one CV.
+    auto_send: whether the first went by itself, even if its draft was then held back for a quality problem of its
+    own. Each goes to the first one's recipient, or through the same form."""
+    reach = job["reach"]
+    if not (profile.cv_per_country and reach["several"]):
+        return
+    group = [app, *app.extras.exclude(status=Status.FAILED).select_related("resume")]  # failed ones may try again
+    held = [other.resume for other in group if other.resume]
+    going = [other.resume for other in group if other.resume and other.status != Status.SKIPPED]  # their addresses
+    countries_held = {countries.key(cv.country) for cv in held if cv.country}
+    existing = set(Resume.objects.filter(pk__in=[cv.pk for cv in reach["allowed"]]).values_list("pk", flat=True))
+    by_country = {}
+    for cv in reach["allowed"]:
+        place, score = countries.key(cv.country), reach["scores"][cv.pk]
+        if place and place not in countries_held and cv not in held and cv.pk in existing and score >= min_score():
+            by_country.setdefault(place, []).append(cv)
+    for options in sorted(by_country.values(), key=lambda options: -max(reach["scores"][cv.pk] for cv in options)):
+        options.sort(key=lambda cv: -reach["scores"][cv.pk])
+        cv = next((cv for cv in options if not any(_addresses(other) & _addresses(cv) for other in going)), None)
+        if cv is None:  # two applications from one address look like spam, so the best is only noted
+            _note_held_back(app, options[0], next(other for other in going if _addresses(other) & _addresses(options[0])),
+                            reach["scores"][options[0].pk])
+            continue
+        extra, is_new = _claim(
+            source_hash(f"{app.source_hash} cv {cv.pk}"),
+            auto_send=auto_send,
+            **_same_job(app, cv),
+        )
+        if is_new:
+            process(extra.pk)
+            extra.refresh_from_db(fields=["status"])
+        if extra.status not in (Status.SKIPPED, Status.FAILED):
+            going.append(cv)
+
+
+def _same_job(app, cv):
+    return {
+        "source": app.source, "crawl": app.crawl, "job_url": app.job_url, "jd_text": app.jd_text,
+        "candidates": app.candidates, "recipient": app.recipient, "parent": app, "resume": cv, "open_to": app.open_to,
+    }
+
+
+def _note_held_back(app, cv, holder, score):
+    if cv.email and emails.mailbox(cv.email) == emails.mailbox(holder.email):
+        clash = f"it has the same email address as {holder.name}. Give it its own email in Setup"
+    else:
+        clash = (
+            f"it would send from the same Gmail account as {holder.name}. Connect a Gmail account with its own address, "
+            "or choose another one for it in Setup"
+        )
+    Application.objects.get_or_create(
+        source_hash=source_hash(f"{app.source_hash} cv {cv.pk}"),
+        defaults={
+            **_same_job(app, cv), "auto_send": False, "status": Status.SKIPPED, "title": app.title,
+            "company": app.company, "location": app.location, "score": score,
+            "note": f"{cv.name} fits this job too (match {score}), but {clash}, or click Retry to draft it anyway.",
+        },
+    )
 
 
 def _fail(app, note):
@@ -425,13 +713,20 @@ def retry(app_id):
             log.exception("Loading page for application %s failed", app_id)
             _fail(app, f"Unexpected error: {exc}")
             return
+        own = {emails.mailbox(address) for address in own_addresses()}
         app.jd_text = page.text[:STORED_JD_CHARS]
-        app.candidates = [a for a in page.emails if a != mailer.address().lower()]
+        app.candidates = [address for address in page.emails if emails.mailbox(address) not in own]
         app.save()
     process(app_id)
 
 
 # ---------------------------------------------------------------- Sending
+
+
+def _cv_gone(app):
+    if app.parent_id:  # it was for that CV only
+        return "The CV for this application was removed, so it can't be sent. Your other CVs have their own."
+    return "The CV chosen for this job was removed. Click Rewrite with Gemini to pick another."
 
 
 def _send_problem(app, cv):
@@ -444,9 +739,14 @@ def _send_problem(app, cv):
     if not app.body.strip():
         return "There's no email to send yet."
     if not cv:
-        return "The CV chosen for this job was removed. Click Rewrite with Gemini to pick another."
+        return _cv_gone(app)
+    if not cv.full_name:
+        return f"Add your name to {cv.name} in Setup first, so the email can be signed."
     if not mailer.is_configured():
         return "Connect Gmail first."
+    if not sender(cv):
+        mine = f"Connect {cv.email}, or choose" if cv.email else "Choose"
+        return f"{mine} which Gmail account sends {cv.name}'s emails in Setup."
     limit = daily_limit()
     if sent_today() >= limit:
         return f"Daily limit of {limit} emails reached, so this is saved for later. Raise DAILY_SEND_LIMIT in .env to send more."
@@ -467,25 +767,55 @@ def send_application(app_id):
         deliver(app_id)
 
 
-def deliver(app_id):
-    """Sends a row already claimed with claim_for_sending()."""
+SAME_JOB_ALREADY = (
+    "An application for this job already went out with this CV or from this email address, so this one waits. "
+    "Click Send if you still want it to go."
+)
+
+
+def _went_with(app, cv, account=""):
+    """Another application for this job that went, or is going, with this CV, its email address or this Gmail
+    account. Checked as each one goes, because accounts and CVs can change after the job was read."""
+    group = app.parent_id or app.pk
+    mine = {emails.mailbox(address) for address in (cv.email, account) if address}
+    others = (
+        Application.objects.filter(Q(pk=group) | Q(parent_id=group))
+        .exclude(pk=app.pk)
+        .filter(status__in=[Status.SENT, Status.SENDING, Status.FILLING])
+        .select_related("resume")
+    )
+    for other in others:
+        theirs = {emails.mailbox(address) for address in (other.sender, other.resume.email if other.resume else "") if address}
+        if other.resume_id == cv.pk or mine & theirs:
+            return other
+    return None
+
+
+def deliver(app_id, by_hand=False):
+    """Sends a row already claimed with claim_for_sending(). by_hand: you pressed Send, so it goes even if another
+    application for the job went out under the same address."""
     with _send_lock:
         app = Application.objects.get(pk=app_id)
         try:
-            profile, cv = Profile.load(), app.resume
+            cv = app.resume
             problem = _send_problem(app, cv)
+            if not problem and not by_hand and _went_with(app, cv, sender(cv)):
+                problem = SAME_JOB_ALREADY
             if problem:
                 app.status, app.note = Status.READY, problem
                 app.save()
                 return
+            app.sender = sender(cv)  # on record before it goes, so an interrupted send says where to look
+            Application.objects.filter(pk=app.pk).update(sender=app.sender)
             mailer.send(
                 to=app.recipient,
                 subject=app.subject or "Job application",
                 body=app.body,
-                from_name=profile.full_name,
-                attachment_name=attachment_name(profile, cv),
+                from_name=cv.full_name,
+                attachment_name=attachment_name(cv),
                 attachment=bytes(cv.data),
                 mimetype=resume.mimetype(cv.name),
+                sender=app.sender,
             )
         except mailer.MailError as exc:
             _fail(app, str(exc))
@@ -544,30 +874,39 @@ def _form_worker():
 
 
 def _form_job(app, profile, cv, submit, stay_open):
+    """Everything the form is filled in with comes from the CV this job got: name, email, phone and links."""
     message = app.body
-    stem = attachment_name(profile, cv).split("_CV")[0]
+    stem = attachment_name(cv).split("_CV")[0]
     return formfill.Job(
         url=app.job_url,
-        full_name=profile.full_name,
-        email=mailer.address(),
-        phone=profile.phone,
-        linkedin=profile.linkedin,
+        full_name=cv.full_name,
+        email=cv.email or sender(cv),
+        phone=cv.phone,
+        linkedin=cv.linkedin,
+        github=resume.github_profile(cv.links),
         message=message,
-        resume_name=attachment_name(profile, cv),
+        resume_name=attachment_name(cv),
         resume_bytes=bytes(cv.data),
         cover_name=f"{stem}_Cover_Letter.docx",
         cover_bytes=resume.letter_as_docx(message),
         allow_consent=profile.allow_consent,
         submit=submit,
         stay_open=stay_open,
-        ask=lambda fields: _ask_gemini(app, profile, cv, fields),
+        ask=lambda fields: _ask_gemini(app, cv, fields),
     )
 
 
-def _ask_gemini(app, profile, cv, fields):
+def _cv_links(cv):
+    linkedin = cv.linkedin if not cv.linkedin or cv.linkedin.lower().startswith("http") else f"https://{cv.linkedin}"
+    return [link for link in (linkedin, *cv.links.split()) if link]
+
+
+def _ask_gemini(app, cv, fields):
     try:
         raw = llm.generate_json(
-            prompts.form_prompt(profile.full_name, cv.text[:CV_CHARS], facts(profile), app.jd_text[:JD_CHARS], fields),
+            prompts.form_prompt(
+                cv.full_name, cv.text[:CV_CHARS], _cv_links(cv), facts(cv), spelling(cv), app.jd_text[:JD_CHARS], fields
+            ),
             prompts.FORM_SCHEMA,
             system=prompts.FORM_SYSTEM,
         )
@@ -596,9 +935,11 @@ def _fill_form(app, chrome):
     submit = app.auto_send and under_limit
     try:
         if not cv:
-            outcome = formfill.Outcome(
-                formfill.NEEDS_YOU, "The CV chosen for this job was removed. Click Rewrite with Gemini to pick another."
-            )
+            outcome = formfill.Outcome(formfill.NEEDS_YOU, _cv_gone(app))
+        elif not cv.full_name:
+            outcome = formfill.Outcome(formfill.NEEDS_YOU, f"Add your name to {cv.name} in Setup first, then press Fill the form.")
+        elif app.auto_send and _went_with(app, cv, cv.email or sender(cv)):
+            outcome = formfill.Outcome(formfill.NEEDS_YOU, SAME_JOB_ALREADY.replace("Click Send", "Press Fill the form"))
         elif crawler.Crawler().allowed(app.job_url):
             outcome = formfill.apply(chrome, _form_job(app, profile, cv, submit, stay_open=not app.auto_send))
         else:
@@ -684,7 +1025,7 @@ def _crawl(run):
     run.total = len(urls)
     run.save()
 
-    own = mailer.address().lower()
+    own = {emails.mailbox(address) for address in own_addresses()}
     fails = already_seen = 0
     for url in urls:
         app, is_new = _claim(
@@ -724,7 +1065,7 @@ def _load_and_process(app, url, first_page, fetcher, own):
     try:
         page = first_page if url == first_page.url else fetcher.fetch(url)
         app.jd_text = page.text[:STORED_JD_CHARS]
-        app.candidates = [address for address in page.emails if address != own]
+        app.candidates = [address for address in page.emails if emails.mailbox(address) not in own]
         app.save()
     except crawler.CrawlError as exc:
         _fail(app, str(exc))

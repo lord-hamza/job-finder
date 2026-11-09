@@ -219,7 +219,12 @@ class FactsTests(PipelineTestCase):
         prompt = generate.call_args.args[0]
         self.assertIn("Where I live now:\n", prompt)
         self.assertIn("Jobs in Pakistan, Lahore, Islamabad, Karachi, Rawalpindi are fine whether on-site, hybrid or remote", prompt)
-        self.assertIn("only fully remote jobs based in United Kingdom, United States", prompt)
+        self.assertIn(
+            "only fully remote jobs open to people living in United Kingdom, United States: based there with no limit that "
+            'leaves them out, limited to places that include one of them, or open to anyone anywhere because the posting '
+            'says so, such as "worldwide". A posting that only says "Remote" is judged by where it\'s based.',
+            prompt,
+        )
 
     def test_living_in_a_country_says_nothing_about_right_to_work(self):
         self.assertIn("Right to work (which countries, and what kind):\n", prompts.FACTS_TEMPLATE)
@@ -227,7 +232,7 @@ class FactsTests(PipelineTestCase):
         self.assertIn("nothing after its colon isn't stated", prompts.FORM_SYSTEM)
 
     def test_what_the_user_writes_replaces_the_starting_text(self):
-        Profile.objects.filter(pk=1).update(facts="Where I live now: Leeds, UK")
+        Resume.objects.filter(pk=self.cv.pk).update(facts="Where I live now: Leeds, UK")
         generate = self.gemini(gemini_job())
         self.submit()
         self.assertIn("Leeds, UK", generate.call_args.args[0])
@@ -287,12 +292,17 @@ class EmailQualityTests(PipelineTestCase):
         self.assertEqual(self.submit().status, Status.FAILED)
 
     def test_sign_off_from_gemini_not_doubled(self):
-        for ending in ("Kind regards,\nSam Taylor", "Best,\nSam", "Thanks!", "Yours sincerely,\nSam Taylor\n07700 900123"):
+        endings = (
+            "\n\nKind regards,\nSam Taylor", "\n\nBest,\nSam", "\n\nThanks!", "\n\nYours sincerely,\nSam Taylor\n07700 900123",
+            " Best regards,", " Best regards, Sam Taylor", " Kind regards,\nSam Taylor",
+        )
+        for ending in endings:
             with self.subTest(ending):
                 Application.objects.all().delete()
-                self.gemini(gemini_job(body=f"{GOOD_BODY}\n\n{ending}"))
+                self.gemini(gemini_job(body=f"{GOOD_BODY}{ending}"))
                 body = self.submit().body
                 self.assertEqual(body.lower().count("sam taylor"), 1)
+                self.assertEqual(body.lower().count("regards"), 1, body[-90:])
                 self.assertTrue(body.endswith("+44 7700 900123 | linkedin.com/in/samtaylor"))
 
     def test_bare_name_at_the_end_not_doubled(self):
@@ -300,15 +310,38 @@ class EmailQualityTests(PipelineTestCase):
         self.assertEqual(self.submit().body.lower().count("sam taylor"), 1)
 
     def test_closing_sentence_kept(self):
-        self.gemini(gemini_job(body=f"{GOOD_BODY}\n\nThank you for reading my application."))
-        self.assertIn("Thank you for reading my application.", self.submit().body)
+        for closing in ("\n\nThank you for reading my application.", " Thanks for considering my application.", " I do my best."):
+            with self.subTest(closing):
+                Application.objects.all().delete()
+                self.gemini(gemini_job(body=f"{GOOD_BODY}{closing}"))
+                self.assertIn(closing.strip(), self.submit().body)
 
     def test_markdown_bold_removed(self):
         self.gemini(gemini_job(body=f"**Hello** {GOOD_BODY}"))
         self.assertNotIn("**", self.submit().body)
 
+    def test_details_saved_while_gemini_writes_are_the_ones_signed(self):
+        def gemini(*args, **kwargs):
+            Resume.objects.filter(pk=self.cv.pk).update(phone="+92 333 0000000", linkedin="")
+            return gemini_job()
+
+        with mock.patch("core.llm.generate_json", side_effect=gemini):
+            app = self.submit()
+        self.assertTrue(app.body.endswith("Kind regards,\nSam Taylor\n+92 333 0000000"), app.body[-60:])
+
+    def test_cv_removed_while_gemini_writes_fails_with_a_reason(self):
+        def gemini(*args, **kwargs):
+            Resume.objects.all().delete()
+            return gemini_job()
+
+        with mock.patch("core.llm.generate_json", side_effect=gemini):
+            app = self.submit()
+        self.assertEqual(app.status, Status.FAILED)
+        self.assertIn("removed while it was being written", app.note)
+        self.assertEqual(len(mail.outbox), 0)
+
     def test_signature_without_optional_details(self):
-        Profile.objects.filter(pk=1).update(phone="", linkedin="")
+        Resume.objects.filter(pk=self.cv.pk).update(phone="", linkedin="")
         self.gemini(gemini_job())
         self.assertTrue(self.submit().body.endswith("Kind regards,\nSam Taylor"))
 
@@ -331,7 +364,7 @@ class EmailQualityTests(PipelineTestCase):
 
     def test_fencing_stays_fast_on_long_blank_runs(self):
         started = time.monotonic()
-        prompts.tailor_prompt("Sam", "", "", [], "<" + " " * 200_000, [], "2026-11-05")
+        prompts.tailor_prompt("", [], "<" + " " * 200_000, [], "2026-11-05")
         self.assertLess(time.monotonic() - started, 5)
 
 
@@ -464,9 +497,8 @@ class SendGuardTests(PipelineTestCase):
         self.assertIn("wordprocessingml", mimetype)
 
     def test_name_with_odd_characters_makes_a_safe_filename(self):
-        profile = Profile.load()
-        profile.full_name = "Zoë O'Neil / Dev"
-        self.assertEqual(pipeline.attachment_name(profile, self.cv), "Zoë_O_Neil_Dev_CV.pdf")
+        self.cv.full_name = "Zoë O'Neil / Dev"
+        self.assertEqual(pipeline.attachment_name(self.cv), "Zoë_O_Neil_Dev_CV.pdf")
 
 
 class CrawlFlowTests(PipelineTestCase):
@@ -793,23 +825,22 @@ class SaveResumeTests(AppTestCase):
             with mock.patch("core.llm.generate_json") as generate:
                 cv = pipeline.save_resume("cv.pdf", self.PDF)
         generate.assert_not_called()
-        profile = Profile.load()
-        self.assertEqual(profile.full_name, "Sam Taylor")
-        self.assertEqual(profile.phone, "+44 7700 900123")
+        self.assertEqual((cv.full_name, cv.country), ("Sam Taylor", "United Kingdom"))
+        self.assertEqual((cv.phone, cv.linkedin), ("+44 7700 900123", "linkedin.com/in/samtaylor"))
         self.assertEqual(bytes(cv.data), self.PDF)
 
     def test_works_without_gemini_key(self):
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
             with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
-                pipeline.save_resume("cv.pdf", self.PDF)
-        self.assertEqual(Profile.load().full_name, "Sam Taylor")
+                cv = pipeline.save_resume("cv.pdf", self.PDF)
+        self.assertEqual(cv.full_name, "Sam Taylor")
 
     def test_scanned_pdf_read_by_gemini(self):
         with mock.patch("core.llm.generate_json", return_value={"text": CV_TEXT}) as generate:
             cv = pipeline.save_resume("scan.pdf", minimal_pdf(" "))
         self.assertEqual(generate.call_args.kwargs["pdf"], minimal_pdf(" "))
         self.assertFalse(generate.call_args.kwargs["patient"], "someone is waiting on the page")
-        self.assertEqual(Profile.load().full_name, "Sam Taylor")
+        self.assertEqual(cv.full_name, "Sam Taylor")
         self.assertEqual(cv.text, CV_TEXT.strip())
 
     def test_scanned_pdf_without_key_explains(self):
@@ -833,12 +864,68 @@ class SaveResumeTests(AppTestCase):
             pipeline.save_resume("cv.pdf", b"not a pdf")
         self.assertEqual(bytes(Resume.objects.get().data), b"%PDF-1.4 fake cv bytes")
 
-    def test_new_cv_never_overwrites_your_details(self):
+    def test_new_cv_never_overwrites_another_cvs_details(self):
         self.make_profile(full_name="Sam T", phone="07000 000000")
         with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
+            new = pipeline.save_resume("cv.pdf", self.PDF)
+        self.cv.refresh_from_db()
+        self.assertEqual((self.cv.full_name, self.cv.phone), ("Sam T", "07000 000000"))
+        self.assertEqual(
+            (new.full_name, new.phone, new.linkedin, new.facts), ("Sam Taylor", "+44 7700 900123", "linkedin.com/in/samtaylor", "")
+        )
+
+    OLD_TEXT = "Sam Taylor\n07000 000000\nPython developer. " * 10  # the old file, whose phone was read from it
+
+    def test_replaced_cv_takes_the_new_files_details_and_keeps_its_facts(self):
+        self.make_profile(
+            resume_name="cv.pdf", resume_text=self.OLD_TEXT, phone="07000 000000", linkedin="", facts="Where I live now: Leeds"
+        )
+        with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
+            cv = pipeline.save_resume("cv.pdf", self.PDF)
+        self.assertEqual(Resume.objects.count(), 1)
+        self.assertEqual(
+            (cv.phone, cv.linkedin, cv.facts), ("+44 7700 900123", "linkedin.com/in/samtaylor", "Where I live now: Leeds")
+        )
+
+    def test_replaced_cv_keeps_what_you_typed_or_cleared_over_the_new_file(self):
+        self.make_profile(resume_name="cv.pdf", phone="07700 111222", linkedin="")  # the file says otherwise
+        with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
+            cv = pipeline.save_resume("cv.pdf", self.PDF)
+        self.assertEqual((cv.phone, cv.linkedin), ("07700 111222", ""))
+
+    def test_replaced_cv_keeps_typed_details_the_new_file_doesnt_have(self):
+        self.make_profile(resume_name="cv.pdf", phone="07000 000000", linkedin="linkedin.com/in/typed")
+        with mock.patch("core.pipeline.resume.extract_text", return_value="Sam Taylor\nPython developer. " * 20):
+            cv = pipeline.save_resume("cv.pdf", self.PDF)
+        self.assertEqual((cv.phone, cv.linkedin), ("07000 000000", "linkedin.com/in/typed"))
+
+    def test_replaced_cv_drops_what_the_old_file_said_when_the_new_one_doesnt(self):
+        self.make_profile(resume_name="cv.pdf")  # its phone and LinkedIn are the ones printed in CV_TEXT
+        with mock.patch("core.pipeline.resume.extract_text", return_value="Sam Taylor\nPython developer. " * 20):
+            cv = pipeline.save_resume("cv.pdf", self.PDF)
+        self.assertEqual((cv.phone, cv.linkedin, cv.replaced), ("", "", True))
+
+    def test_a_new_cv_isnt_marked_replaced(self):
+        with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
+            self.assertFalse(pipeline.save_resume("cv.pdf", self.PDF).replaced)
+
+    def test_replacing_a_cv_re_signs_its_unsent_drafts(self):
+        self.make_profile(resume_name="cv.pdf", resume_text=self.OLD_TEXT, phone="07000 000000", linkedin="")
+        signed = "Dear Team,\n\nHello.\n\nKind regards,\nSam Taylor\n07000 000000"
+        draft = Application.objects.create(source_hash="d", source=Source.PASTE, resume=self.cv, status=Status.READY, body=signed)
+        sent = Application.objects.create(source_hash="s", source=Source.PASTE, resume=self.cv, status=Status.SENT, body=signed)
+        with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
             pipeline.save_resume("cv.pdf", self.PDF)
-        profile = Profile.load()
-        self.assertEqual((profile.full_name, profile.phone), ("Sam T", "07000 000000"))
+        draft.refresh_from_db()
+        sent.refresh_from_db()
+        self.assertTrue(draft.body.endswith("Kind regards,\nSam Taylor\n+44 7700 900123 | linkedin.com/in/samtaylor"))
+        self.assertEqual(sent.body, signed)
+
+    def test_details_behind_links_are_found(self):
+        data = minimal_pdf("Sam Taylor", links=["tel:92 333 0481822", "https://www.linkedin.com/in/sam-pk"])
+        with mock.patch("core.pipeline.resume.extract_text", return_value="Sam Taylor\nAI engineer in Lahore. " * 10):
+            cv = pipeline.save_resume("pk.pdf", data)
+        self.assertEqual((cv.phone, cv.linkedin), ("+92 333 0481822", "https://www.linkedin.com/in/sam-pk"))
 
     def test_long_file_name_keeps_extension(self):
         with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):

@@ -24,6 +24,13 @@ from playwright.sync_api import sync_playwright
 log = logging.getLogger(__name__)
 
 SUBMITTED, NEEDS_YOU, NO_FORM = "submitted", "needs_you", "no_form"
+# Submit was pressed, so the application may already be with the employer.
+CAPTCHA_AFTER_SUBMIT = "The site showed a CAPTCHA after Submit. Solve it in the Chrome window, then press I submitted it."
+CODE_AFTER_SUBMIT = "The site emailed you a code. Enter it in the Chrome window, then press I submitted it."
+UNCONFIRMED_SUBMIT = (
+    "Pressed Submit, but the site didn't confirm it. Check the Chrome window before trying again, so you don't apply twice."
+)
+MAYBE_SUBMITTED = (CAPTCHA_AFTER_SUBMIT, CODE_AFTER_SUBMIT, UNCONFIRMED_SUBMIT)
 GOTO_MS = 45_000
 ACTION_MS = 5_000
 RESULT_SECONDS = 25
@@ -99,7 +106,9 @@ _CONTACT = (
     ("email", re.compile(r"\be-?mail\b", re.I)),
     ("phone", re.compile(r"\b(phone|mobile|telephone|contact number|tel)\b", re.I)),
     ("linkedin", re.compile(r"linked\s?in", re.I)),
+    ("github", re.compile(r"git\s?hub", re.I)),
 )
+_USERNAME = re.compile(r"user\s?name|handle", re.I)
 _RESUME = re.compile(r"resume|r[eé]sum[eé]|\bcv\b|curriculum", re.I)
 _SOMEONE_ELSES_FILE = re.compile(r"friend|refer|colleague|partner|\bshare\b|someone|another", re.I)
 _COVER = re.compile(r"cover(ing)?[ _-]?letter", re.I)
@@ -479,6 +488,7 @@ class Job:
     submit: bool  # may press Submit when nothing is in the way
     stay_open: bool  # the user is watching, so leave the window for them
     ask: Callable  # list of Fields -> {key: Answer}, from Gemini
+    github: str = ""  # a profile link, https://github.com/you
 
 
 @dataclass
@@ -657,7 +667,7 @@ def _run(context, page, job, folder, answers):
     if blockers:
         note = "Needs you: " + "; ".join(dict.fromkeys(blockers)) + "."
         if any(blocker.startswith("No answer") for blocker in blockers):
-            note += " Add what's missing to your facts in Setup and press Fill the form, or finish it yourself."
+            note += " Add what's missing to this CV's facts in Setup and press Fill the form, or finish it yourself."
         return Outcome(NEEDS_YOU, note), job.stay_open, page
     if not job.submit:
         note = "The form is filled in. Check it in the Chrome window and press Submit there." if job.stay_open else "It wasn't submitted."
@@ -902,13 +912,18 @@ def _contact_value(item, job):
             name = "phone"
         else:
             return None
+    if name == "github" and (not job.github or item.kind != "text" or len(item.clean_label) > 60):
+        return None  # Gemini answers it from the CV and facts: a question about your work, or no link known
     first, _, last = job.full_name.strip().partition(" ")
     linkedin = job.linkedin
     if linkedin and not linkedin.lower().startswith("http"):
         linkedin = f"https://{linkedin}"
+    github = job.github.rstrip("/")
+    if github and _USERNAME.search(item.clean_label or item.identity):  # "GitHub username" wants the name, not a link
+        github = github.rsplit("/", 1)[-1]
     return {
         "first_name": first, "last_name": last.strip(), "full_name": job.full_name.strip(),
-        "email": job.email, "phone": job.phone, "linkedin": linkedin,
+        "email": job.email, "phone": job.phone, "linkedin": linkedin, "github": github,
     }[name]
 
 
@@ -1171,21 +1186,15 @@ def _await_result(page, before, start_url, traffic):
             ):
                 return Outcome(SUBMITTED, "The site moved to its confirmation page."), False
         if any(_safe_evaluate(frame, _CAPTCHA, False) for frame in page.frames):
-            return Outcome(
-                NEEDS_YOU, "The site showed a CAPTCHA after Submit. Solve it in the Chrome window, then press I submitted it."
-            ), True
+            return Outcome(NEEDS_YOU, CAPTCHA_AFTER_SUBMIT), True
         if _CODE_PROMPT.search(text) and not had_code:
-            return Outcome(
-                NEEDS_YOU, "The site emailed you a code. Enter it in the Chrome window, then press I submitted it."
-            ), True
+            return Outcome(NEEDS_YOU, CODE_AFTER_SUBMIT), True
         if second >= 3:
             errors = _safe_evaluate(page.main_frame, _FORM_ERRORS) or {"alerts": [], "invalid": 0}
             if errors["alerts"] or errors["invalid"]:
                 detail = " ".join(errors["alerts"])[:200] or f'{errors["invalid"]} field(s) were rejected'
                 return Outcome(NEEDS_YOU, f"The site didn't accept the form: {detail}. Fix it in the Chrome window."), True
-    return Outcome(
-        NEEDS_YOU, "Pressed Submit, but the site didn't confirm it. Check the Chrome window before trying again, so you don't apply twice."
-    ), True
+    return Outcome(NEEDS_YOU, UNCONFIRMED_SUBMIT), True
 
 
 def _around(text, match):

@@ -9,11 +9,12 @@ It saves hours of repetitive applying, while hard-coded rules stop it applying t
 flowchart TD
     A["Pasted job description"] --> C
     B["Job board or careers link"] --> T["Crawl the page and shortlist jobs"]
-    T --> C["Gemini picks the best CV, scores the job and writes the application"]
-    C --> R{"Meets your job rules?"}
+    T --> C["Gemini reads where the job is open to, scores every CV and writes the application"]
+    C --> P["Code picks the CV: one for a country the job is open to, the best-scoring"]
+    P --> R{"Meets your job rules?"}
     R -- No --> S["Skip, with the reason"]
     R -- Yes --> E{"Application email in the posting?"}
-    E -- Yes --> M["Send through Gmail with the CV attached"]
+    E -- Yes --> M["Send from that CV's Gmail account with the CV attached"]
     E -- "No, job was crawled" --> F["Fill in the website form in Chrome"]
     E -- "No, job was pasted" --> W["Wait for the user to add an address"]
     F --> Q{"Every answer known, no CAPTCHA or login?"}
@@ -30,10 +31,10 @@ flowchart TD
 | AI | Gemini REST API | Structured JSON through response schemas, automatic fallback to a second model, and capped timeouts and retries. |
 | Crawling | requests, BeautifulSoup | Honours robots.txt, limits request rate and download size, and reads schema.org JobPosting data. |
 | Browser automation | Playwright, Chrome | Reads forms with injected JavaScript, including iframes and React-style dropdowns, and renders pages that need JavaScript. |
-| Documents | pypdf, python-docx | Extracts CV text locally. Gemini reads scanned PDFs. |
-| Email | Django mail, Gmail SMTP over SSL | Sends the tailored message with the CV attached, using an App Password. |
+| Documents | pypdf, python-docx | Extracts CV text, links and contact details locally, and tells which country a CV is for from its location and phone code. Gemini reads scanned PDFs. |
+| Email | Django mail, Gmail SMTP over SSL | Sends the tailored message with the CV attached, from the Gmail account matching that CV's email. Up to 10 accounts, each with its own App Password. |
 | Background work | Python threads | Crawling, tailoring, sending and form filling run off the request thread. One worker owns the browser, and interrupted work is recovered on restart. |
-| Testing | Django test runner, headless Chrome | 434 tests, including real-browser runs against a local fake job site and deliberately hostile pages. |
+| Testing | Django test runner, headless Chrome | 616 tests, including real-browser runs against a local fake job site and deliberately hostile pages. |
 
 ## Project layout
 
@@ -45,14 +46,14 @@ flowchart TD
 | `core/llm.py`, `core/prompts.py` | Gemini client, model fallback, prompts and response schemas |
 | `core/emails.py` | Finds real application addresses in text, including obfuscated ones |
 | `core/mailer.py` | Gmail SMTP sending and readable error messages |
-| `core/resume.py` | CV text extraction and contact details |
+| `core/resume.py`, `core/countries.py` | CV text, contact details, links and country |
 | `core/models.py`, `core/views.py`, `core/templates/` | Data model and dashboard |
 | `core/tests/` | Test suite, including the fake job site |
 
 ## Engineering highlights
 
 - **Model output is treated as untrusted.** The model can only pick a recipient from addresses printed in the posting; only the user can type a different one. Text from the web is fenced in prompts against injection, and form answers are checked against the options on the page.
-- **Fixed rules overrule the model.** A wording check rejects hybrid jobs the model approved, eligibility and salary answers are only accepted when the model attributes them to the user's stated facts, and passwords, bank details and date of birth are never filled in.
+- **Fixed rules overrule the model.** A wording check rejects hybrid jobs the model approved, the code rather than the model decides which CV a job may get, eligibility and salary answers are only accepted when the model attributes them to the user's stated facts, and passwords, bank details and date of birth are never filled in.
 - **Guards against duplicate applications.** Atomic status updates stop a double click sending twice, and a unique hash per pasted text or job URL stops the same advert being processed again. A send interrupted by a crash is flagged for the user rather than retried.
 - **Browser actions are conservative.** It only submits through a button whose label plainly means submit. Success needs both data accepted by the site and a new confirmation. Honeypot fields stay empty, and CAPTCHAs and logins are handed to the user, never bypassed.
 - **Network access is guarded.** Page navigations and redirects in the crawler and the browser are checked against private addresses, so a job page can't send it to a local service.
@@ -73,27 +74,40 @@ This creates the virtual environment, installs dependencies, creates `.env` from
 
 ## Your CVs and job rules
 
-Upload one CV for each kind of work you do, such as business development and WordPress, all at once. For every job, Gemini picks the CV that fits it best and writes the email from it. Your name, contact details and facts are entered once and shared by all your CVs.
+Upload one CV for each country or kind of work you apply for, all at once. Each CV is its own identity: its name, email, phone, LinkedIn, other links such as GitHub and the country it's for are read from the file when it's uploaded, including details that are only clickable links, and can be corrected in Setup. The country comes from where the CV says you are and from its phone number's country code. Each CV also has its own facts, typed in Setup, which answer form questions about location, right to work, notice and salary.
+
+For every job, Gemini reads where it's open to and scores each CV, and the code decides which CV it gets:
+
+| The job | The CV it gets |
+| --- | --- |
+| On-site, hybrid, or not clearly remote | A CV for a country where your rules allow on-site work. Anywhere else, it isn't applied to. |
+| Remote, limited to some countries | That country's CV. With none, it waits for you rather than going with another country's. |
+| Remote, and the posting says anyone anywhere can apply | Your best-matching CV, and with "one CV per country" on, the best CV of each other country that scores your minimum and has its own email address and Gmail account, each as a separate application. An employer in a country where your rules allow on-site work only gets that country's CV. |
+| Remote, with no limit stated | The CV for the country the employer is in, or your best match. |
+
+The email goes out from the Gmail account with that CV's address, signed with that CV's name, phone and LinkedIn, and website forms are filled in with its details. Your consent setting and job rules are shared by all your CVs.
 
 Job rules are set in the dashboard under "Where you'll work", so anyone can use it:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | On-site, hybrid or remote are all fine in | `Pakistan, Lahore, Islamabad, Karachi, Rawalpindi` | Jobs that mention one of these places can be on-site, hybrid or remote. Leave it empty to apply to remote jobs only. |
-| Anywhere else, fully remote jobs from | `United Kingdom, United States` | Everywhere else, only fully remote jobs from these countries. Leave it empty for any country. |
+| Anywhere else, fully remote jobs open to people in | `United Kingdom, United States` | Everywhere else, only fully remote jobs based in these countries, limited to them, or open to anyone anywhere. Leave it empty for any country. |
+| One CV per country | On | A job open to anyone anywhere also goes with the best CV of each of your other countries. |
 
 ## Configuration
 
-Add these to `.env`. The three required keys can also be entered in the dashboard:
+Add these to `.env`. The required keys can also be entered in the dashboard:
 
 | Setting | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `GEMINI_API_KEY` | Yes | | Key from [Google AI Studio](https://aistudio.google.com/apikey) |
-| `GMAIL_ADDRESS` | Yes | | The address applications are sent from |
+| `GMAIL_ADDRESS` | Yes | | An address applications are sent from |
 | `GMAIL_APP_PASSWORD` | Yes | | [App Password](https://myaccount.google.com/apppasswords), which needs 2-Step Verification on |
+| `GMAIL_ADDRESS_2`, `GMAIL_APP_PASSWORD_2`, ... | No | | More accounts, up to 10 |
 | `GEMINI_MODEL` | No | `gemini-flash-lite-latest` | Preferred Gemini model |
 | `MIN_MATCH_SCORE` | No | `60` | Crawled jobs scoring below this are skipped |
-| `DAILY_SEND_LIMIT` | No | `25` | Most emails and forms submitted per day |
+| `DAILY_SEND_LIMIT` | No | `25` | Most emails and forms submitted per day, all accounts together |
 | `CRAWL_MAX_JOBS` | No | `15` | Most job pages opened per link |
 
 ## Tests

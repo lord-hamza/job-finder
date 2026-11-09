@@ -90,10 +90,23 @@ def is_usable(address):
     return re.sub(r"[._-]", "", local) not in _NOT_RECRUITING
 
 
-def find_emails(text, exclude=""):
-    """Addresses worth applying to, leaving out the applicant's own."""
-    exclude = (exclude or "").lower()
-    return [a for a in all_addresses(text) if a != exclude and is_usable(a)]
+def mailbox(address):
+    """One spelling per mailbox, for telling whether two addresses reach the same inbox. Gmail ignores dots and
+    anything after a + in the name, and googlemail.com is gmail.com."""
+    address = (address or "").strip().lower()
+    local, _, domain = address.rpartition("@")
+    if not local:
+        return address
+    local = local.split("+", 1)[0]
+    if domain in ("gmail.com", "googlemail.com"):
+        return f"{local.replace('.', '')}@gmail.com"
+    return f"{local}@{domain}"
+
+
+def find_emails(text, exclude=()):
+    """Addresses worth applying to, leaving out the applicant's own: one address, or several."""
+    own = {mailbox(address) for address in ([exclude] if isinstance(exclude, str) else exclude or ()) if address}
+    return [a for a in all_addresses(text) if mailbox(a) not in own and is_usable(a)]
 
 
 def best_guess(candidates, text):

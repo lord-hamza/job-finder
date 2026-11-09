@@ -30,6 +30,11 @@ def gemini_job(**overrides):
         "title": "Senior Python Developer",
         "company": "Acme Ltd",
         "location": "Remote, UK",
+        "work_setup": "remote",
+        "based_in": "",
+        "limited_to": [],
+        "open_to_anywhere": False,
+        "cv_scores": [],
         "rules_met": "yes",
         "match_score": 82,
         "reason": "Strong Django and AWS match. No Kubernetes in the CV.",
@@ -41,16 +46,21 @@ def gemini_job(**overrides):
     return job
 
 
-def minimal_pdf(text):
-    """A small real PDF containing the given text."""
+def minimal_pdf(text, links=()):
+    """A small real PDF containing the given text, with clickable links to the given addresses."""
     stream = f"BT /F1 12 Tf 20 700 Td ({text}) Tj ET".encode()
+    annots = b" /Annots [%s]" % b" ".join(b"%d 0 R" % (6 + i) for i in range(len(links))) if links else b""
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"/Resources << /Font << /F1 5 0 R >> >>%s >>" % annots,
         b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    objects += [
+        b"<< /Type /Annot /Subtype /Link /Rect [20 20 120 40] /A << /S /URI /URI (%s) >> >>" % link.encode()
+        for link in links
     ]
     out = io.BytesIO()
     out.write(b"%PDF-1.4\n")
@@ -94,17 +104,23 @@ class AppTestMixin:
         patcher.enable() if hasattr(patcher, "enable") else patcher.start()
         self.addCleanup(patcher.disable if hasattr(patcher, "disable") else patcher.stop)
 
+    CV_FIELDS = ("full_name", "email", "phone", "linkedin", "links", "country", "send_from", "facts")
+
     def make_profile(self, **overrides):
-        """You, with one CV uploaded. resume_* overrides go to the CV."""
-        fields = {
+        """You, with one CV uploaded. resume_* overrides and the CV's own details go to the CV."""
+        fields = {}
+        cv = {
+            "name": "my cv final (2).pdf",
+            "data": b"%PDF-1.4 fake cv bytes",
+            "text": CV_TEXT,
             "full_name": "Sam Taylor",
             "phone": "+44 7700 900123",
             "linkedin": "linkedin.com/in/samtaylor",
         }
-        cv = {"name": "my cv final (2).pdf", "data": b"%PDF-1.4 fake cv bytes", "text": CV_TEXT}
+        renamed = {"resume_name": "name", "resume_bytes": "data", "resume_text": "text"}
         for key, value in overrides.items():
-            if key.startswith("resume_"):
-                cv[{"resume_name": "name", "resume_bytes": "data", "resume_text": "text"}[key]] = value
+            if key in renamed or key in self.CV_FIELDS:
+                cv[renamed.get(key, key)] = value
             else:
                 fields[key] = value
         profile = Profile.load()

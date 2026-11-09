@@ -5,7 +5,7 @@
     <h1>Job Finder</h1>
     <div class="chips">
       <span class="chip {% if resumes %}yes{% else %}no{% endif %}">{% if resumes %}{{ resumes|length }} CV{{ resumes|length|pluralize }} ready{% else %}CV missing{% endif %}</span>
-      <span class="chip {% if gmail_connected %}yes{% else %}no{% endif %}">Gmail {% if gmail_connected %}connected{% else %}not connected{% endif %}</span>
+      <span class="chip {% if gmail_connected %}yes{% else %}no{% endif %}">{% if gmail_connected %}{{ accounts|length }} Gmail account{{ accounts|length|pluralize }}{% else %}Gmail not connected{% endif %}</span>
       <span class="chip {% if gemini_connected %}yes{% else %}no{% endif %}">Gemini {% if gemini_connected %}connected{% else %}not connected{% endif %}</span>
     </div>
   </header>
@@ -15,36 +15,59 @@
   {% endfor %}
 
   <details class="card setup" {% if setup_open %}open{% endif %}>
-    <summary>Setup{% if missing %}: {{ missing|join:", " }}{% endif %}</summary>
+    <summary>Setup{% if missing or attention %}: {% for item in missing %}{{ item }}{% if not forloop.last or attention %}, {% endif %}{% endfor %}{{ attention|join:", " }}{% endif %}</summary>
     <div class="setup-grid">
       <section>
         <h3>Your CVs</h3>
-        <p class="small muted">Upload one for each kind of work you do. Each job gets whichever CV suits it best.</p>
+        <p class="small muted">Upload one for each country or kind of work you apply for. Each job gets a CV from a country it's open to, the one that suits it best, and goes out with that CV's name, email, phone, links and facts, from its Gmail account. The name, contact details, links and country are read from the CV itself and you can correct them here. The facts in About you are yours to fill in for each CV.</p>
+        <p class="small muted">Eligibility, location, salary and notice questions on forms are only ever answered from the facts of the CV a job gets. Anything missing stops that form and comes back to you, so leave a line blank if you're unsure.</p>
         {% for cv in resumes %}
-        <form method="post" action="{% url 'delete_resume' cv.pk %}" class="cv-row">
-          {% csrf_token %}
-          <span>{{ cv.name }}</span>
-          <button type="submit" class="secondary">Remove</button>
-        </form>
+        <details class="cv"{% if not cv.facts or not cv.full_name %} open{% endif %}>
+          <summary>
+            <span class="cv-name">{{ cv.name }}</span>
+            <span class="small muted">{% if cv.full_name %}{{ cv.full_name }}{% else %}<span class="warn-inline">Name not found</span>{% endif %} · {{ cv.country|default:"No country" }} · <span class="nowrap">{{ cv.phone|default:"No phone" }}</span> · {{ cv.email|default:"No email" }} · {% if cv.linkedin %}LinkedIn{% else %}No LinkedIn{% endif %} · {% if cv.facts %}Facts saved{% else %}Facts not filled in{% endif %}</span>
+            {% if cv.outside_rules %}<span class="small warn-text">{{ cv.country }} isn't in your job rules, so jobs limited to it are never applied to.</span>{% endif %}
+            {% if cv.no_sender %}<span class="small warn-text">No Gmail account sends its emails yet: connect {{ cv.email|default:"its address" }}, or choose an account below.</span>{% endif %}
+          </summary>
+          <form method="post" action="{% url 'save_cv' cv.pk %}">
+            {% csrf_token %}
+            <label for="full_name-{{ cv.pk }}">Name</label>
+            <input id="full_name-{{ cv.pk }}" type="text" name="full_name" value="{{ cv.full_name }}" maxlength="120" required>
+            <label for="email-{{ cv.pk }}">Email</label>
+            <input id="email-{{ cv.pk }}" type="email" name="email" value="{{ cv.email }}" maxlength="254">
+            <label for="phone-{{ cv.pk }}">Phone</label>
+            <input id="phone-{{ cv.pk }}" type="text" name="phone" value="{{ cv.phone }}" maxlength="40">
+            <label for="linkedin-{{ cv.pk }}">LinkedIn</label>
+            <input id="linkedin-{{ cv.pk }}" type="text" name="linkedin" value="{{ cv.linkedin }}" maxlength="200">
+            <label for="links-{{ cv.pk }}">Other links, such as GitHub, one per line</label>
+            <textarea id="links-{{ cv.pk }}" name="links" rows="3">{{ cv.links }}</textarea>
+            <label for="country-{{ cv.pk }}">Country it's for</label>
+            <input id="country-{{ cv.pk }}" type="text" name="country" value="{{ cv.country }}" maxlength="60" list="country-names" placeholder="Leave empty if it isn't for one country">
+            {% if accounts %}
+            <label for="send_from-{{ cv.pk }}">Sends from</label>
+            <select id="send_from-{{ cv.pk }}" name="send_from">
+              <option value="">Automatic: {{ cv.auto_account|default:"none matches its email, so choose one" }}</option>
+              {% for account in accounts %}<option value="{{ account }}"{% if account == cv.chosen_account %} selected{% endif %}>{{ account }}</option>{% endfor %}
+            </select>
+            {% endif %}
+            {% if cv.shares_email %}<p class="small muted" style="margin-top:6px">Another CV has the same email address, so a job only ever gets one of them.</p>{% elif cv.shares_account %}<p class="small muted" style="margin-top:6px">Another CV sends from the same Gmail account, so a job only ever gets one of them.</p>{% endif %}
+            <label for="facts-{{ cv.pk }}">About you, for jobs that get this CV</label>
+            <textarea id="facts-{{ cv.pk }}" name="facts" rows="9">{{ cv.facts_text }}</textarea>
+            <div class="actions">
+              <button type="submit" class="secondary">Save</button>
+              <button type="submit" class="secondary" form="remove-{{ cv.pk }}">Remove CV</button>
+            </div>
+          </form>
+          <form id="remove-{{ cv.pk }}" method="post" action="{% url 'delete_resume' cv.pk %}">{% csrf_token %}</form>
+        </details>
         {% endfor %}
+        <datalist id="country-names">{% for name in country_names %}<option value="{{ name }}">{% endfor %}</datalist>
         <form method="post" action="{% url 'upload_resume' %}" enctype="multipart/form-data">
           {% csrf_token %}
           <label for="resume">PDF or Word .docx, up to 10 MB each. A file with the same name replaces the old one.</label>
           <input id="resume" type="file" name="resume" accept=".pdf,.docx" multiple required>
           <div class="actions"><button type="submit">Upload CVs</button></div>
         </form>
-        {% if resumes %}
-        <form method="post" action="{% url 'save_profile' %}">
-          {% csrf_token %}
-          <label for="full_name">Your name (signs your emails)</label>
-          <input id="full_name" type="text" name="full_name" value="{{ profile.full_name }}" maxlength="120" required>
-          <label for="phone">Phone (optional)</label>
-          <input id="phone" type="text" name="phone" value="{{ profile.phone }}" maxlength="40">
-          <label for="linkedin">LinkedIn (optional)</label>
-          <input id="linkedin" type="text" name="linkedin" value="{{ profile.linkedin }}" maxlength="200">
-          <div class="actions"><button type="submit" class="secondary">Save details</button></div>
-        </form>
-        {% endif %}
       </section>
 
       <section>
@@ -54,40 +77,54 @@
           {% csrf_token %}
           <label for="onsite_places">On-site, hybrid or remote are all fine in</label>
           <input id="onsite_places" type="text" name="onsite_places" value="{{ profile.onsite_places }}" maxlength="300" placeholder="Leave empty for remote jobs only">
-          <label for="remote_countries">Anywhere else, fully remote jobs from</label>
+          <label for="remote_countries">Anywhere else, fully remote jobs open to people in</label>
           <input id="remote_countries" type="text" name="remote_countries" value="{{ profile.remote_countries }}" maxlength="300" placeholder="Leave empty for any country">
+          <label class="checkbox">
+            <input type="checkbox" name="cv_per_country" {% if profile.cv_per_country %}checked{% endif %}>
+            <span>One CV per country: when a remote job is open to people anywhere, also apply with the best CV of each of your other countries that scores {{ min_score }} or more and has its own email address and Gmail account. Each goes as a separate application.</span>
+          </label>
           <div class="actions"><button type="submit" class="secondary">Save job rules</button></div>
         </form>
-        <div class="facts">
-          <h3>Facts for application forms</h3>
-          <p class="small muted">Eligibility, location, salary and notice questions are only ever answered from here. Anything missing stops that form and comes back to you, so leave a line blank if you're unsure. Adding your city to the first line helps with forms that ask for it.</p>
-          <form method="post" action="{% url 'save_facts' %}">
+        {% if resumes %}
+        <div class="subsection">
+          <h3>You</h3>
+          <form method="post" action="{% url 'save_profile' %}">
             {% csrf_token %}
-            <label for="facts">About you</label>
-            <textarea id="facts" name="facts" rows="9">{{ facts_text }}</textarea>
             <label class="checkbox">
               <input type="checkbox" name="allow_consent" {% if profile.allow_consent %}checked{% endif %}>
               <span>Tick required privacy and data consent boxes for me. Without this, forms that have one come back to you.</span>
             </label>
-            <div class="actions"><button type="submit" class="secondary">Save facts</button></div>
+            <div class="actions"><button type="submit" class="secondary">Save</button></div>
           </form>
         </div>
+        {% endif %}
       </section>
 
-      {% if not gmail_connected %}
       <section>
-        <h3>Gmail</h3>
+        <h3>Gmail accounts</h3>
+        {% if accounts %}
+        <p class="small muted">Each CV sends from the account with its own email address. If none matches, choose one for it above. The daily limit counts all accounts together.</p>
+        <ul class="accounts">
+          {% for account in accounts %}
+          <li>
+            <span>{{ account }}</span>
+            <form method="post" action="{% url 'disconnect_gmail' %}">{% csrf_token %}<input type="hidden" name="address" value="{{ account }}"><button type="submit" class="secondary">Remove</button></form>
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        {% if accounts|length < max_accounts %}
         <form method="post" action="{% url 'connect_gmail' %}" autocomplete="off">
           {% csrf_token %}
-          <label for="address">Gmail address</label>
+          <label for="address">{% if accounts %}Another Gmail address{% else %}Gmail address{% endif %}</label>
           <input id="address" type="email" name="address" required>
           <label for="password">App Password</label>
           <input id="password" type="password" name="password" autocomplete="new-password" required>
           <p class="small muted" style="margin-top:6px">Your normal password won't work. <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">Create an App Password</a> (needs 2-Step Verification on).</p>
-          <div class="actions"><button type="submit">Connect Gmail</button></div>
+          <div class="actions"><button type="submit"{% if accounts %} class="secondary"{% endif %}>Connect Gmail</button></div>
         </form>
+        {% endif %}
       </section>
-      {% endif %}
 
       {% if not gemini_connected %}
       <section>
@@ -107,7 +144,7 @@
   <div class="grid">
     <section class="card">
       <h2>Paste a job description</h2>
-      <p class="small muted">Include the email address to apply to. Gemini tailors the email and it goes out from your Gmail with your CV attached. It uses whichever of your CVs suits the job best, and only jobs that meet your job rules go out by themselves.</p>
+      <p class="small muted">Include the email address to apply to. Gemini tailors the email and it goes out from your Gmail with your CV attached. It uses a CV from a country the job is open to, the one that suits it best, and only jobs that meet your job rules go out by themselves.</p>
       <form method="post" action="{% url 'apply_jd' %}">
         {% csrf_token %}
         <label for="jd">Job description</label>

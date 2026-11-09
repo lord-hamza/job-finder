@@ -41,18 +41,27 @@ p { margin: 0 0 12px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
 .grid { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; margin-bottom: 16px; align-items: start; }
 .setup { margin-bottom: 16px; }
-.setup summary { cursor: pointer; font-weight: 600; }
+.setup > summary { cursor: pointer; font-weight: 600; }
 .setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 20px; margin-top: 16px; }
-.facts { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
-.cv-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
-.cv-row span { overflow-wrap: anywhere; }
-.facts textarea { min-height: 160px; }
+.subsection { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+details.cv { padding: 8px 0 12px; border-bottom: 1px solid var(--line); }
+details.cv > summary { cursor: pointer; overflow-wrap: anywhere; }
+details.cv .cv-name { font-weight: 600; margin-right: 6px; }
+details.cv .nowrap { white-space: nowrap; }
+details.cv textarea { min-height: 160px; }
+details.cv textarea[name=links] { min-height: 70px; }
+details.cv .warn-text { display: block; color: var(--warn); }
+details.cv .warn-inline { color: var(--warn); }
+ul.accounts { list-style: none; margin: 0 0 8px; padding: 0; }
+ul.accounts li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+ul.accounts button { padding: 4px 10px; font-size: 13px; }
+select { width: 100%; padding: 8px 10px; font: inherit; color: var(--text); background: var(--field); border: 1px solid var(--line); border-radius: 8px; }
 label { display: block; font-size: 13px; font-weight: 500; margin: 10px 0 4px; }
 input[type=text], input[type=email], input[type=password], input[type=url], input[type=file], textarea {
   width: 100%; padding: 8px 10px; font: inherit; color: var(--text); background: var(--field);
   border: 1px solid var(--line); border-radius: 8px;
 }
-input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 textarea { resize: vertical; min-height: 220px; }
 .checkbox { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; margin: 12px 0 0; }
 .checkbox input { margin-top: 4px; }

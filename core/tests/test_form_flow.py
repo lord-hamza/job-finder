@@ -178,6 +178,27 @@ class FillFormResultTests(FlowTestCase):
         self.assertEqual(job.cover_name, "Sam_Taylor_Cover_Letter.docx")
         self.assertTrue(job.cover_bytes.startswith(b"PK"))
         self.assertTrue(job.allow_consent)
+        self.assertEqual((job.phone, job.linkedin), ("+44 7700 900123", "linkedin.com/in/samtaylor"))
+
+    def test_job_carries_the_chosen_cvs_details_and_facts(self):
+        pk = Resume.objects.create(
+            name="pk.pdf", data=b"%PDF pk", text="AI engineer. " * 30, phone="+92 333 0000000",
+            facts="Where I live now: Lahore, Pakistan", full_name="Muhammad Sam", email="sam.pk@gmail.com",
+            links="https://github.com/sampk\nhttps://sampk.dev",
+        )
+        Resume.objects.filter(pk=self.cv.pk).update(facts="Where I live now: Leeds, United Kingdom")
+        self.run_with(formfill.Outcome(formfill.NEEDS_YOU), app=self.app(status=Status.FORM_QUEUE, resume=pk))
+        job = self.apply_call.call_args.args[1]
+        self.assertEqual((job.phone, job.linkedin, job.resume_bytes), ("+92 333 0000000", "", b"%PDF pk"))
+        self.assertEqual((job.full_name, job.email, job.github), ("Muhammad Sam", "sam.pk@gmail.com", "https://github.com/sampk"))
+        self.assertEqual((job.resume_name, job.cover_name), ("Muhammad_Sam_CV.pdf", "Muhammad_Sam_Cover_Letter.docx"))
+        with mock.patch("core.llm.generate_json", return_value={"answers": []}) as generate:
+            job.ask([])
+        prompt = generate.call_args.args[0]
+        self.assertIn("Lahore, Pakistan", prompt)
+        self.assertIn("<links>\nhttps://github.com/sampk\nhttps://sampk.dev\n</links>", prompt)
+        self.assertIn("Candidate name: Muhammad Sam", prompt)
+        self.assertNotIn("Leeds", prompt)
 
     def test_row_that_is_no_longer_queued_is_left_alone(self):
         app = self.app(status=Status.SENT)
@@ -190,10 +211,11 @@ class AskGeminiTests(FlowTestCase):
     FIELD = formfill.Field("f1", "text", "text", "Current company", True)
 
     def test_prompt_contains_the_facts_and_question(self):
-        Profile.objects.filter(pk=1).update(facts="I live in Karachi.")
+        self.cv.facts = "I live in Karachi."
+        self.cv.save()
         answer = {"answers": [{"id": "f1", "values": ["Northwind"], "source": "CV"}]}
         with mock.patch("core.llm.generate_json", return_value=answer) as generate:
-            replies = pipeline._ask_gemini(self.app(), Profile.load(), self.cv, [self.FIELD])
+            replies = pipeline._ask_gemini(self.app(), self.cv, [self.FIELD])
         prompt = generate.call_args.args[0]
         self.assertIn("I live in Karachi.", prompt)
         self.assertIn(CV_TEXT.strip()[:50], prompt)
@@ -204,12 +226,12 @@ class AskGeminiTests(FlowTestCase):
     def test_failure_becomes_a_form_error(self):
         with mock.patch("core.llm.generate_json", side_effect=llm.LLMError("quota")):
             with self.assertRaisesMessage(formfill.FormError, "quota"):
-                pipeline._ask_gemini(self.app(), Profile.load(), self.cv, [self.FIELD])
+                pipeline._ask_gemini(self.app(), self.cv, [self.FIELD])
 
     def test_odd_answers_cant_crash_it(self):
         for raw in ({}, {"answers": None}, {"answers": ["x"]}, {"answers": [{"id": "f1", "values": "text"}]}):
             with self.subTest(raw), mock.patch("core.llm.generate_json", return_value=raw):
-                self.assertEqual(pipeline._ask_gemini(self.app(), Profile.load(), self.cv, [self.FIELD]), {})
+                self.assertEqual(pipeline._ask_gemini(self.app(), self.cv, [self.FIELD]), {})
 
 
 class WorkerTests(FlowTestCase):
@@ -343,7 +365,7 @@ class ViewTests(FlowTestCase):
             with self.subTest(name):
                 self.assertEqual(self.client.get(reverse(name, args=[app.pk])).status_code, 405)
                 self.assertEqual(self.client.post(reverse(name, args=[9999])).status_code, 404)
-        self.assertEqual(self.client.get(reverse("save_facts")).status_code, 405)
+        self.assertEqual(self.client.get(reverse("save_cv", args=[self.cv.pk])).status_code, 405)
 
     def test_detail_offers_the_right_buttons(self):
         waiting = self.client.get(reverse("detail", args=[self.app(status=Status.NEEDS_YOU).pk]))
@@ -379,25 +401,30 @@ class ViewTests(FlowTestCase):
         pipeline.ensure_form_worker.assert_called()
 
     def test_facts_saved_and_shown(self):
-        self.client.post(reverse("save_facts"), {"facts": "I live in Karachi.\r\nNo sponsorship needed.", "allow_consent": "on"})
-        profile = Profile.load()
-        self.assertEqual(profile.facts, "I live in Karachi.\nNo sponsorship needed.")
-        self.assertTrue(profile.allow_consent)
+        self.client.post(
+            reverse("save_cv", args=[self.cv.pk]), {"full_name": "Sam Taylor", "facts": "I live in Karachi.\r\nNo sponsorship needed."}
+        )
+        self.cv.refresh_from_db()
+        self.assertEqual(self.cv.facts, "I live in Karachi.\nNo sponsorship needed.")
         self.assertContains(self.client.get(reverse("home")), "I live in Karachi.")
 
     def test_consent_box_off_by_default_and_can_be_turned_off(self):
         self.assertFalse(Profile.load().allow_consent)
-        self.client.post(reverse("save_facts"), {"facts": "x", "allow_consent": "on"})
-        self.client.post(reverse("save_facts"), {"facts": "x"})
+        self.client.post(reverse("save_profile"), {"allow_consent": "on"})
+        self.assertTrue(Profile.load().allow_consent)
+        self.client.post(reverse("save_profile"), {})
         self.assertFalse(Profile.load().allow_consent)
 
     def test_untouched_template_isnt_saved_as_facts(self):
-        self.client.post(reverse("save_facts"), {"facts": prompts.FACTS_TEMPLATE})
-        self.assertEqual(Profile.load().facts, "")
+        self.client.post(
+            reverse("save_cv", args=[self.cv.pk]), {"full_name": "Sam Taylor", "facts": prompts.FACTS_TEMPLATE.replace("\n", "\r\n")}
+        )
+        self.cv.refresh_from_db()
+        self.assertEqual(self.cv.facts, "")
         self.assertContains(self.client.get(reverse("home")), "Where I live now:")
 
     def test_facts_are_sent_with_every_email(self):
-        Profile.objects.filter(pk=1).update(facts="I live in Karachi.")
+        Resume.objects.filter(pk=self.cv.pk).update(facts="I live in Karachi.")
         app, _ = pipeline.submit_jd("A job. Apply to jobs@acme.co.uk. " * 5, False)
         with mock.patch("core.llm.generate_json", return_value=gemini_job(application_email="jobs@acme.co.uk")) as generate:
             pipeline.process(app.pk)
@@ -405,7 +432,8 @@ class ViewTests(FlowTestCase):
 
     def test_email_rules_guard_against_implying_uk_residence(self):
         self.assertIn("Where the candidate lives comes only from <facts>", prompts.TAILOR_SYSTEM)
-        self.assertIn("UK or remote work experience", prompts.TAILOR_SYSTEM)
+        self.assertIn("If the job is in or limited to a country where the CV shows work experience", prompts.TAILOR_SYSTEM)
+        self.assertIn("never where the candidate lives or may work", prompts.TAILOR_SYSTEM)
 
 
 class EndToEndTests(FlowMixin, RealBrowserTestCase):

@@ -6,7 +6,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 from django.urls import reverse
 
-from core import llm, mailer
+from core import llm, mailer, pipeline
 from core.models import Application, CrawlRun, Profile, Resume
 from core.tests.base import CV_TEXT, JD_TEXT, AppTestCase, gemini_job, minimal_pdf
 
@@ -40,12 +40,12 @@ class HomeTests(ViewTestCase):
         response = self.client.get(reverse("home"))
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Paste a job description")
-        self.assertContains(response, "Gmail connected")
+        self.assertContains(response, "1 Gmail account")
         self.assertEqual(response.context["missing"], [])
 
     def test_keys_already_connected_arent_asked_for_again(self):
         response = self.client.get(reverse("home"))
-        self.assertNotContains(response, 'name="password"')
+        self.assertContains(response, "Another Gmail address")  # more accounts can always be added
         self.assertNotContains(response, 'name="key"')
         self.assertContains(response, "Gemini connected")
 
@@ -55,10 +55,12 @@ class HomeTests(ViewTestCase):
         self.assertContains(response, 'name="password"')
         self.assertContains(response, 'name="key"')
 
-    def test_setup_stays_open_until_facts_are_done(self):
+    def test_setup_stays_open_until_every_cv_has_facts(self):
         self.assertTrue(self.client.get(reverse("home")).context["setup_open"])
-        self.client.post(reverse("save_facts"), {"facts": "Where I live now: Lahore"})
+        self.client.post(reverse("save_cv", args=[self.cv.pk]), {"full_name": "Sam Taylor", "facts": "Where I live now: Lahore"})
         self.assertFalse(self.client.get(reverse("home")).context["setup_open"])
+        Resume.objects.create(name="second.pdf", data=b"%PDF", text="x", full_name="Sam Taylor")
+        self.assertTrue(self.client.get(reverse("home")).context["setup_open"])
 
     def test_empty_install_points_to_setup(self):
         Profile.objects.all().delete()
@@ -86,7 +88,8 @@ class HomeTests(ViewTestCase):
     def test_post_routes_refuse_get(self):
         app = self.app()
         for url in (
-            reverse("upload_resume"), reverse("save_profile"), reverse("connect_gmail"), reverse("save_gemini"),
+            reverse("upload_resume"), reverse("save_profile"), reverse("save_cv", args=[self.cv.pk]),
+            reverse("connect_gmail"), reverse("save_gemini"),
             reverse("apply_jd"), reverse("start_crawl"), reverse("send", args=[app.pk]), reverse("retry", args=[app.pk]),
         ):
             with self.subTest(url):
@@ -164,15 +167,128 @@ class UploadTests(AppTestCase):
 
 
 class ProfileTests(ViewTestCase):
-    def test_saves_and_cleans(self):
-        self.client.post(reverse("save_profile"), {"full_name": "  Sam\r\nBcc: x ", "phone": "1", "linkedin": "l"})
-        profile = Profile.load()
-        self.assertEqual((profile.full_name, profile.phone, profile.linkedin), ("Sam Bcc: x", "1", "l"))
+    def test_saves_consent(self):
+        self.client.post(reverse("save_profile"), {"allow_consent": "on"})
+        self.assertTrue(Profile.load().allow_consent)
+        self.client.post(reverse("save_profile"), {})
+        self.assertFalse(Profile.load().allow_consent)
+
+
+class CvDetailsTests(ViewTestCase):
+    def save(self, cv, **data):
+        data.setdefault("full_name", "Sam Taylor")
+        return self.client.post(reverse("save_cv", args=[cv.pk]), data, follow=True)
 
     def test_name_required(self):
-        response = self.client.post(reverse("save_profile"), {"full_name": "   "}, follow=True)
-        self.assertContains(response, "name is needed")
-        self.assertEqual(Profile.load().full_name, "Sam Taylor")
+        response = self.save(self.cv, full_name="   ", phone="1")
+        self.assertContains(response, "the name is needed to sign the emails that go out with it, so the old one stays")
+        self.cv.refresh_from_db()
+        self.assertEqual((self.cv.full_name, self.cv.phone), ("Sam Taylor", "1"))
+
+    def test_saves_and_cleans_that_cv_only(self):
+        other = Resume.objects.create(name="pk.pdf", data=b"%PDF", text="x", phone="+92 300 1234567")
+        response = self.save(
+            self.cv,
+            full_name="  Sam\r\nBcc: x ",
+            phone="  +44 7700\r\n900123 ",
+            linkedin=" linkedin.com/in/sam ",
+            facts="Where I live now: Leeds\r\nSalary: 50k\r\n",
+        )
+        self.assertContains(response, "Saved the details for my cv final (2).pdf")
+        self.cv.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(
+            (self.cv.full_name, self.cv.phone, self.cv.linkedin, self.cv.facts),
+            ("Sam Bcc: x", "+44 7700 900123", "linkedin.com/in/sam", "Where I live now: Leeds\nSalary: 50k"),
+        )
+        self.assertEqual((other.full_name, other.phone, other.linkedin, other.facts), ("", "+92 300 1234567", "", ""))
+
+    def test_unsent_emails_take_the_new_details(self):
+        signed = "Dear Team,\n\nHello.\n\nKind regards,\nSam Taylor\n+44 7700 900123 | linkedin.com/in/samtaylor"
+        ready = self.app(status=Status.READY, body=signed)
+        sent = self.app(status=Status.SENT, body=signed)
+        sending = self.app(status=Status.SENDING, body=signed)
+        edited = self.app(status=Status.READY, body=f"{signed}\nP.S. Call me any time.")
+        other = self.app(status=Status.READY, body=signed, resume=Resume.objects.create(name="b.pdf", data=b"%PDF", text="x"))
+        response = self.save(self.cv, phone="+92 333 0000000", linkedin="", facts="x")
+        self.assertContains(response, "1 unsent email now signed with them too.")
+        expected = {
+            ready: "Kind regards,\nSam Taylor\n+92 333 0000000",
+            sent: signed,
+            sending: signed,
+            edited: "P.S. Call me any time.",
+            other: signed,
+        }
+        for app, ending in expected.items():
+            with self.subTest(app.status):
+                app.refresh_from_db()
+                self.assertTrue(app.body.endswith(ending), app.body[-60:])
+
+    def test_drafts_signed_under_an_earlier_name_are_re_signed_too(self):
+        draft = self.app(status=Status.READY, body="Hello\n\nKind regards,\nSam T\n+44 7700 900123 | linkedin.com/in/samtaylor")
+        self.save(self.cv, phone="+92 333 0000000", linkedin="", facts="x")
+        draft.refresh_from_db()
+        self.assertEqual(draft.body, "Hello\n\nKind regards,\nSam T\n+92 333 0000000")
+
+    def test_a_draft_without_a_contact_line_gets_one(self):
+        Resume.objects.filter(pk=self.cv.pk).update(phone="", linkedin="")
+        draft = self.app(status=Status.MANUAL, body="Hello\n\nKind regards,\nSam Taylor")
+        self.save(Resume.objects.get(pk=self.cv.pk), phone="+92 333 0000000", linkedin="", facts="x")
+        draft.refresh_from_db()
+        self.assertEqual(draft.body, "Hello\n\nKind regards,\nSam Taylor\n+92 333 0000000")
+
+    def test_emails_that_may_have_gone_out_are_left_alone(self):
+        signed = "Hello\n\nKind regards,\nSam Taylor\n+44 7700 900123 | linkedin.com/in/samtaylor"
+        maybe = [
+            self.app(status=Status.FAILED, body=signed, note=pipeline.INTERRUPTED_SEND),
+            self.app(status=Status.NEEDS_YOU, body=signed, note=pipeline.INTERRUPTED_FORM),
+            *[self.app(status=Status.NEEDS_YOU, body=signed, note=note) for note in pipeline.formfill.MAYBE_SUBMITTED],
+        ]
+        response = self.save(self.cv, phone="+92 333 0000000", linkedin="", facts="x")
+        self.assertNotContains(response, "unsent email")
+        for app in maybe:
+            app.refresh_from_db()
+            self.assertEqual(app.body, signed)
+
+    def test_unchanged_details_leave_emails_alone(self):
+        self.app(status=Status.READY, body="Hello\n\nKind regards,\nSam Taylor\n+44 7700 900123 | linkedin.com/in/samtaylor")
+        response = self.save(self.cv, phone="+44 7700 900123", linkedin="linkedin.com/in/samtaylor", facts="x")
+        self.assertNotContains(response, "unsent email")
+
+    def test_details_can_be_cleared(self):
+        self.save(self.cv, phone="", linkedin="", facts="")
+        self.cv.refresh_from_db()
+        self.assertEqual((self.cv.phone, self.cv.linkedin, self.cv.facts), ("", "", ""))
+
+    def test_long_values_are_cut(self):
+        self.save(self.cv, full_name="n" * 999, phone="1" * 99, linkedin="l" * 999, country="c" * 99, facts="f" * 9999)
+        self.cv.refresh_from_db()
+        self.assertEqual(
+            (len(self.cv.full_name), len(self.cv.phone), len(self.cv.linkedin), len(self.cv.country), len(self.cv.facts)),
+            (120, 40, 200, 60, 5000),
+        )
+
+    def test_saving_leaves_the_file_alone(self):
+        self.save(self.cv, phone="1", facts="x")
+        self.assertEqual(bytes(Resume.objects.get(pk=self.cv.pk).data), b"%PDF-1.4 fake cv bytes")
+
+    def test_unknown_cv(self):
+        self.assertEqual(self.client.post(reverse("save_cv", args=[9999]), {"phone": "1"}).status_code, 404)
+
+    def test_each_cv_shows_its_own_details(self):
+        Resume.objects.create(name="pk.pdf", data=b"%PDF", text="x", phone="+92 300 1234567", facts="Where I live now: Lahore")
+        response = self.client.get(reverse("home"))
+        for words in ("+44 7700 900123", "linkedin.com/in/samtaylor", "+92 300 1234567", "Where I live now: Lahore", "No LinkedIn"):
+            with self.subTest(words):
+                self.assertContains(response, words)
+        self.assertContains(response, "Where I live now:\nRight to work")  # a CV without facts starts from the template
+        self.assertContains(response, 'id="facts-%d"' % self.cv.pk)
+
+    def test_details_are_escaped(self):
+        Resume.objects.filter(pk=self.cv.pk).update(phone="<b>1</b>", linkedin='"><script>', facts="</textarea><script>")
+        response = self.client.get(reverse("home"))
+        self.assertNotContains(response, "<script>")
+        self.assertNotContains(response, "<b>1</b>")
 
 
 class ConnectGmailTests(ViewTestCase):
@@ -184,11 +300,17 @@ class ConnectGmailTests(ViewTestCase):
             response = self.post(address="New@Gmail.com ", password="wxyz wxyz wxyz wxyz")
         verify.assert_called_once_with("new@gmail.com", "wxyzwxyzwxyzwxyz")
         self.assertContains(response, "Gmail connected as new@gmail.com")
-        saved = self.env_file.read_text()
-        self.assertIn("GMAIL_ADDRESS='new@gmail.com'", saved)
-        self.assertIn("GMAIL_APP_PASSWORD='wxyzwxyzwxyzwxyz'", saved)
-        self.assertEqual(os.environ["GMAIL_ADDRESS"], "new@gmail.com")
+        saved = self.env_file.read_text()  # the first account stays where it was, and this one goes next to it
+        self.assertIn("GMAIL_ADDRESS_2='new@gmail.com'", saved)
+        self.assertIn("GMAIL_APP_PASSWORD_2='wxyzwxyzwxyzwxyz'", saved)
+        self.assertEqual(mailer.accounts(), ["sam@gmail.com", "new@gmail.com"])
         self.assertEqual(self.env_file.stat().st_mode & 0o777, 0o600)
+
+    def test_the_first_account_goes_where_it_always_did(self):
+        with mock.patch.dict(os.environ, {"GMAIL_ADDRESS": "", "GMAIL_APP_PASSWORD": ""}), mock.patch("core.mailer.verify"):
+            self.post(address="new@gmail.com", password="wxyzwxyzwxyzwxyz")
+            self.assertIn("GMAIL_ADDRESS='new@gmail.com'", self.env_file.read_text())
+            self.assertEqual(mailer.accounts(), ["new@gmail.com"])
 
     def test_bad_login_not_saved(self):
         with mock.patch("core.mailer.verify", side_effect=mailer.MailError("Gmail rejected the login")):
