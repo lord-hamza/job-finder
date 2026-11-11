@@ -60,7 +60,7 @@ class HomeTests(ViewTestCase):
 
     def test_setup_stays_open_until_every_cv_has_facts(self):
         self.assertTrue(self.client.get(reverse("home")).context["setup_open"])
-        self.client.post(reverse("save_cv", args=[self.cv.pk]), {"full_name": "Sam Taylor", "facts": "Where I live now: Lahore"})
+        self.save_setup(facts="Where I live now: Lahore")
         self.assertFalse(self.client.get(reverse("home")).context["setup_open"])
         Resume.objects.create(name="second.pdf", data=b"%PDF", text="x", full_name="Sam Taylor")
         self.assertTrue(self.client.get(reverse("home")).context["setup_open"])
@@ -91,7 +91,7 @@ class HomeTests(ViewTestCase):
     def test_post_routes_refuse_get(self):
         app = self.app()
         for url in (
-            reverse("upload_resume"), reverse("save_profile"), reverse("save_cv", args=[self.cv.pk]),
+            reverse("upload_resume"), reverse("save_setup"),
             reverse("connect_gmail"), reverse("save_gemini"),
             reverse("apply_jd"), reverse("start_crawl"), reverse("send", args=[app.pk]), reverse("retry", args=[app.pk]),
         ):
@@ -202,20 +202,19 @@ class UploadTests(AppTestCase):
 
 class ProfileTests(ViewTestCase):
     def test_saves_consent(self):
-        self.client.post(reverse("save_profile"), {"allow_consent": "on"})
+        self.save_setup(allow_consent=True)
         self.assertTrue(Profile.load().allow_consent)
-        self.client.post(reverse("save_profile"), {})
+        self.save_setup(allow_consent=False)
         self.assertFalse(Profile.load().allow_consent)
 
 
 class CvDetailsTests(ViewTestCase):
     def save(self, cv, **data):
-        data.setdefault("full_name", "Sam Taylor")
-        return self.client.post(reverse("save_cv", args=[cv.pk]), data, follow=True)
+        return self.save_setup(cv, **data)
 
     def test_name_required(self):
         response = self.save(self.cv, full_name="   ", phone="1")
-        self.assertContains(response, "the name is needed to sign the emails that go out with it, so the old one stays")
+        self.assertContains(response, "the name is needed to sign its emails, so the old one stays. The rest is saved.")
         self.cv.refresh_from_db()
         self.assertEqual((self.cv.full_name, self.cv.phone), ("Sam Taylor", "1"))
 
@@ -228,7 +227,7 @@ class CvDetailsTests(ViewTestCase):
             linkedin=" linkedin.com/in/sam ",
             facts="Where I live now: Leeds\r\nSalary: 50k\r\n",
         )
-        self.assertContains(response, "Saved the details for my cv final (2).pdf")
+        self.assertContains(response, "Setup saved.")
         self.cv.refresh_from_db()
         other.refresh_from_db()
         self.assertEqual(
@@ -245,7 +244,7 @@ class CvDetailsTests(ViewTestCase):
         edited = self.app(status=Status.READY, body=f"{signed}\nP.S. Call me any time.")
         other = self.app(status=Status.READY, body=signed, resume=Resume.objects.create(name="b.pdf", data=b"%PDF", text="x"))
         response = self.save(self.cv, phone="+92 333 0000000", linkedin="", facts="x")
-        self.assertContains(response, "1 unsent email now signed with them too.")
+        self.assertContains(response, "1 unsent email now signed with the new details.")
         expected = {
             ready: "Kind regards,\nSam Taylor\n+92 333 0000000",
             sent: signed,
@@ -307,7 +306,9 @@ class CvDetailsTests(ViewTestCase):
         self.assertEqual(bytes(Resume.objects.get(pk=self.cv.pk).data), b"%PDF-1.4 fake cv bytes")
 
     def test_unknown_cv(self):
-        self.assertEqual(self.client.post(reverse("save_cv", args=[9999]), {"phone": "1"}).status_code, 404)
+        data = self.setup_form()
+        data.update({"cv-9999-full_name": "Someone", "cv-9999-phone": "1"})  # removed in another tab: ignored
+        self.assertContains(self.client.post(reverse("save_setup"), data, follow=True), "Setup saved.")
 
     def test_each_cv_shows_its_own_details(self):
         Resume.objects.create(name="pk.pdf", data=b"%PDF", text="x", phone="+92 300 1234567", facts="Where I live now: Lahore")
@@ -608,3 +609,31 @@ class DetailTests(ViewTestCase):
                 app = self.app(status=status)
                 self.client.post(reverse("retry", args=[app.pk]))
                 spawn.assert_not_called()
+
+
+class OneSaveTests(ViewTestCase):
+    def test_one_button_saves_every_cv_your_rules_and_consent(self):
+        other = Resume.objects.create(name="pk.pdf", data=b"%PDF", text="x", full_name="Sam T")
+        data = self.setup_form(phone="+44 1", onsite_places="Lahore", allow_consent=True, cv_per_country=False)
+        data[f"cv-{other.pk}-country"] = "pakistan"
+        response = self.client.post(reverse("save_setup"), data, follow=True)
+        self.assertContains(response, "Setup saved.")
+        self.cv.refresh_from_db()
+        other.refresh_from_db()
+        profile = Profile.load()
+        self.assertEqual((self.cv.phone, other.country), ("+44 1", "Pakistan"))
+        self.assertEqual((profile.onsite_places, profile.allow_consent, profile.cv_per_country), ("Lahore", True, False))
+
+    def test_a_cv_uploaded_after_the_page_was_opened_is_left_alone(self):
+        data = self.setup_form()
+        later = Resume.objects.create(name="new.pdf", data=b"%PDF", text="x", full_name="Sam", phone="+92 300 1234567")
+        self.client.post(reverse("save_setup"), data)
+        later.refresh_from_db()
+        self.assertEqual((later.full_name, later.phone), ("Sam", "+92 300 1234567"))
+
+    def test_setup_has_one_save_button(self):
+        page = self.client.get(reverse("home")).content.decode()
+        self.assertEqual(page.count("Save setup"), 1)
+        self.assertNotIn(">Save<", page)
+        self.assertNotIn("Save job rules", page)
+        self.assertEqual(page.count('form="setup"'), page.count('name="cv-') + 4)  # every CV field, two rules, two boxes

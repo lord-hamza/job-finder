@@ -34,7 +34,7 @@ flowchart TD
 | Documents | pypdf, python-docx | Extracts CV text, links and contact details locally, and tells which country a CV is for from its location and phone code. Gemini reads scanned PDFs. |
 | Email | Django mail, Gmail SMTP over SSL | Sends the tailored message with the CV attached, from the Gmail account matching that CV's email. Up to 10 accounts, each with its own App Password. |
 | Background work | Python threads | Crawling, tailoring, sending and form filling run off the request thread. One worker owns the browser, and interrupted work is recovered on restart. |
-| Testing | Django test runner, headless Chrome | 623 tests, including real-browser runs against a local fake job site and deliberately hostile pages. |
+| Testing | Django test runner, headless Chrome | 626 tests, including real-browser runs against a local fake job site and deliberately hostile pages. |
 
 ## Project layout
 

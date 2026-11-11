@@ -291,8 +291,7 @@ class SetupViewTests(AppTestCase):
         self.make_profile()
 
     def save(self, **data):
-        data.setdefault("full_name", "Sam Taylor")
-        return self.client.post(reverse("save_cv", args=[self.cv.pk]), data, follow=True)
+        return self.save_setup(**data)
 
     def test_every_detail_is_saved_and_tidied(self):
         with mock.patch.dict(os.environ, {"GMAIL_ADDRESS_2": "sam.uk@gmail.com", "GMAIL_APP_PASSWORD_2": "x"}):
@@ -352,9 +351,9 @@ class SetupViewTests(AppTestCase):
         self.assertContains(page, '<option value="United Kingdom">')
 
     def test_the_rules_form_saves_the_cv_per_country_choice(self):
-        self.client.post(reverse("save_rules"), {"onsite_places": "Lahore", "remote_countries": "UK"})
+        self.save_setup(cv_per_country=False)
         self.assertFalse(Profile.load().cv_per_country)
-        self.client.post(reverse("save_rules"), {"onsite_places": "Lahore", "remote_countries": "UK", "cv_per_country": "on"})
+        self.save_setup(cv_per_country=True)
         self.assertTrue(Profile.load().cv_per_country)
 
 

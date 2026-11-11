@@ -641,8 +641,7 @@ class IntegrityTests(WorldwideMixin, RoutingTestCase):
         self.gemini(self.answer(self.uk, limited_to=["United Kingdom"], application_email="jobs@acme.co.uk", subject=""))
         app = self.submit(UK_ONLY)
         self.assertTrue(app.body.endswith("Kind regards,\n+44 7412 284417"), app.body[-40:])
-        self.client.post(reverse("save_cv", args=[self.uk.pk]), {"full_name": "Muhammad Hamza", "phone": "+44 7412 284417",
-                                                                  "email": "hamza.uk@gmail.com", "country": "UK"})
+        self.save_setup(self.uk, full_name="Muhammad Hamza")
         app.refresh_from_db()
         self.assertTrue(app.body.endswith("Kind regards,\nMuhammad Hamza\n+44 7412 284417"), app.body[-60:])
         self.assertEqual(app.subject, "Application for Senior Python Developer - Muhammad Hamza")

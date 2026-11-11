@@ -161,7 +161,7 @@ class JobRulesTests(CvTestCase):
         self.assertIn("Only fully remote jobs.", generate.call_args.args[0])
 
     def test_rules_form_saves_and_tidies(self):
-        self.client.post(reverse("save_rules"), {"onsite_places": " Karachi ,, Lahore", "remote_countries": "Canada"})
+        self.save_setup(onsite_places=" Karachi ,, Lahore", remote_countries="Canada")
         profile = Profile.load()
         self.assertEqual((profile.onsite_places, profile.remote_countries), ("Karachi, Lahore", "Canada"))
         self.assertContains(

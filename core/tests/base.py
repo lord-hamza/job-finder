@@ -7,6 +7,9 @@ from unittest import mock
 
 from django.test import TestCase, TransactionTestCase, override_settings
 
+from django.urls import reverse
+
+from core import mailer, prompts
 from core.models import Profile, Resume
 
 CV_TEXT = (
@@ -129,6 +132,33 @@ class AppTestMixin:
         profile.save()
         self.cv = Resume.objects.create(**cv)
         return profile
+
+
+    PROFILE_FIELDS = ("onsite_places", "remote_countries", "cv_per_country", "allow_consent")
+
+    def setup_form(self, cv=None, **changes):
+        """What Setup posts, as the page shows it now, with changes: your settings by name, the rest for cv (self.cv
+        if not given). True and False tick and untick a box."""
+        profile = Profile.load()
+        data = {"onsite_places": profile.onsite_places, "remote_countries": profile.remote_countries}
+        data.update({box: "on" for box in ("cv_per_country", "allow_consent") if getattr(profile, box)})
+        for each in Resume.objects.all():
+            for field in ("full_name", "email", "phone", "linkedin", "links", "country"):
+                data[f"cv-{each.pk}-{field}"] = getattr(each, field)
+            data[f"cv-{each.pk}-facts"] = each.facts or prompts.FACTS_TEMPLATE  # as the page shows an empty one
+            if mailer.accounts():  # the account box is only there while one is connected
+                data[f"cv-{each.pk}-send_from"] = each.send_from
+        target = cv or getattr(self, "cv", None)
+        for key, value in changes.items():
+            name = key if key in self.PROFILE_FIELDS else f"cv-{target.pk}-{key}"
+            if value is False:
+                data.pop(name, None)
+            else:
+                data[name] = "on" if value is True else value
+        return data
+
+    def save_setup(self, cv=None, **changes):
+        return self.client.post(reverse("save_setup"), self.setup_form(cv, **changes), follow=True)
 
 
 class AppTestCase(AppTestMixin, TestCase):

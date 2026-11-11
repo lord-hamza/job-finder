@@ -156,71 +156,68 @@ def delete_resume(request, pk):
 
 
 @require_POST
-def save_profile(request):
+def save_setup(request):
+    """Everything in Setup at once: each CV's details, your job rules and the consent box."""
     profile = Profile.load()
+    profile.onsite_places = _places(request.POST.get("onsite_places", ""))
+    profile.remote_countries = _places(request.POST.get("remote_countries", ""))
+    profile.cv_per_country = request.POST.get("cv_per_country") == "on"
     profile.allow_consent = request.POST.get("allow_consent") == "on"
     profile.save()
-    messages.success(request, "Saved.")
+    resigned = 0
+    for cv in Resume.objects.defer("data"):
+        prefix = f"cv-{cv.pk}-"
+        if f"{prefix}full_name" not in request.POST:
+            continue  # uploaded after this page was opened
+        fields = {key[len(prefix):]: value for key, value in request.POST.items() if key.startswith(prefix)}
+        problems, count = _save_cv(cv, fields)
+        resigned += count
+        if problems:
+            messages.error(request, f"{cv.name}: {'; and '.join(problems)}. The rest is saved.")
+    emails = f" {resigned} unsent email{'s' if resigned > 1 else ''} now signed with the new details." if resigned else ""
+    messages.success(request, f"Setup saved.{emails}")
     return redirect("home")
 
 
-def _one_line(request, field, size):
-    return " ".join(request.POST.get(field, "").split())[:size]
+def _places(text):
+    return ", ".join(pipeline.split_places(text))[:300]
 
 
-@require_POST
-def save_cv(request, pk):
+def _one_line(value, size):
+    return " ".join((value or "").split())[:size]
+
+
+def _save_cv(cv, fields):
     """Who one CV says you are, and what goes out with it. A value that can't be used keeps the saved one, and
-    everything else you typed is still saved."""
-    cv = get_object_or_404(Resume.objects.defer("data"), pk=pk)
+    everything else is still saved. Returns (problems, how many unsent emails were signed again)."""
     old_name, old_phone, old_linkedin = cv.full_name, cv.phone, cv.linkedin
     problems = []
-    name = _one_line(request, "full_name", 120)
+    name = _one_line(fields.get("full_name"), 120)
     if name:
         cv.full_name = name
     else:
-        problems.append("the name is needed to sign the emails that go out with it, so the old one stays")
-    address = _one_line(request, "email", 254).lower()
+        problems.append("the name is needed to sign its emails, so the old one stays")
+    address = _one_line(fields.get("email"), 254).lower()
     try:
         if address:
             validate_email(address)
         cv.email = address
     except ValidationError:
         problems.append(f"{address} isn't a valid email address, so the old one stays")
-    if "send_from" in request.POST:  # only offered while an account is connected
-        send_from = request.POST.get("send_from", "").strip()
+    if "send_from" in fields:  # only offered while an account is connected
+        send_from = fields["send_from"].strip()
         if send_from and not mailer.account(send_from):
             problems.append(f"{send_from} isn't a connected Gmail account")
         else:
             cv.send_from = mailer.account(send_from)
-    text = request.POST.get("facts", "").replace("\r\n", "\n").strip()
-    cv.phone = _one_line(request, "phone", 40)
-    cv.linkedin = _one_line(request, "linkedin", 200)
-    cv.links = "\n".join(resume.clean_links(request.POST.get("links", "")))
-    cv.country = countries.canonical(_one_line(request, "country", 60))[:60]
+    text = (fields.get("facts") or "").replace("\r\n", "\n").strip()
+    cv.phone = _one_line(fields.get("phone"), 40)
+    cv.linkedin = _one_line(fields.get("linkedin"), 200)
+    cv.links = "\n".join(resume.clean_links(fields.get("links", "")))
+    cv.country = countries.canonical(_one_line(fields.get("country"), 60))[:60]
     cv.facts = "" if text == prompts.FACTS_TEMPLATE else text[:5000]
     cv.save(update_fields=["full_name", "email", "phone", "linkedin", "links", "country", "send_from", "facts"])
-    resigned = pipeline.resign_drafts(cv, old_name, old_phone, old_linkedin)
-    emails = f" {resigned} unsent email{'s' if resigned > 1 else ''} now signed with them too." if resigned else ""
-    if problems:
-        messages.error(request, f"Saved the rest of {cv.name}'s details, but {'; and '.join(problems)}.")
-    else:
-        messages.success(request, f"Saved the details for {cv.name}.{emails}")
-    return redirect("home")
-
-
-@require_POST
-def save_rules(request):
-    def places(field):
-        return ", ".join(pipeline.split_places(request.POST.get(field, "")))[:300]
-
-    profile = Profile.load()
-    profile.onsite_places = places("onsite_places")
-    profile.remote_countries = places("remote_countries")
-    profile.cv_per_country = request.POST.get("cv_per_country") == "on"
-    profile.save()
-    messages.success(request, f"Job rules saved: {profile.rule_summary}.")
-    return redirect("home")
+    return problems, pipeline.resign_drafts(cv, old_name, old_phone, old_linkedin)
 
 
 @require_POST

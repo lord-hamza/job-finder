@@ -365,7 +365,7 @@ class ViewTests(FlowTestCase):
             with self.subTest(name):
                 self.assertEqual(self.client.get(reverse(name, args=[app.pk])).status_code, 405)
                 self.assertEqual(self.client.post(reverse(name, args=[9999])).status_code, 404)
-        self.assertEqual(self.client.get(reverse("save_cv", args=[self.cv.pk])).status_code, 405)
+        self.assertEqual(self.client.get(reverse("save_setup")).status_code, 405)
 
     def test_detail_offers_the_right_buttons(self):
         waiting = self.client.get(reverse("detail", args=[self.app(status=Status.NEEDS_YOU).pk]))
@@ -401,24 +401,20 @@ class ViewTests(FlowTestCase):
         pipeline.ensure_form_worker.assert_called()
 
     def test_facts_saved_and_shown(self):
-        self.client.post(
-            reverse("save_cv", args=[self.cv.pk]), {"full_name": "Sam Taylor", "facts": "I live in Karachi.\r\nNo sponsorship needed."}
-        )
+        self.save_setup(facts="I live in Karachi.\r\nNo sponsorship needed.")
         self.cv.refresh_from_db()
         self.assertEqual(self.cv.facts, "I live in Karachi.\nNo sponsorship needed.")
         self.assertContains(self.client.get(reverse("home")), "I live in Karachi.")
 
     def test_consent_box_off_by_default_and_can_be_turned_off(self):
         self.assertFalse(Profile.load().allow_consent)
-        self.client.post(reverse("save_profile"), {"allow_consent": "on"})
+        self.save_setup(allow_consent=True)
         self.assertTrue(Profile.load().allow_consent)
-        self.client.post(reverse("save_profile"), {})
+        self.save_setup(allow_consent=False)
         self.assertFalse(Profile.load().allow_consent)
 
     def test_untouched_template_isnt_saved_as_facts(self):
-        self.client.post(
-            reverse("save_cv", args=[self.cv.pk]), {"full_name": "Sam Taylor", "facts": prompts.FACTS_TEMPLATE.replace("\n", "\r\n")}
-        )
+        self.save_setup(facts=prompts.FACTS_TEMPLATE.replace("\n", "\r\n"))
         self.cv.refresh_from_db()
         self.assertEqual(self.cv.facts, "")
         self.assertContains(self.client.get(reverse("home")), "Where I live now:")

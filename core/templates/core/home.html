@@ -29,36 +29,31 @@
             {% if cv.outside_rules %}<span class="small warn-text">{{ cv.country }} isn't in your job rules, so jobs limited to it are never applied to.</span>{% endif %}
             {% if cv.no_sender %}<span class="small warn-text">No Gmail account sends its emails yet: connect {{ cv.email|default:"its address" }}, or choose an account below.</span>{% endif %}
           </summary>
-          <form method="post" action="{% url 'save_cv' cv.pk %}">
-            {% csrf_token %}
+          <div class="cv-fields">
             <label for="full_name-{{ cv.pk }}">Name</label>
-            <input id="full_name-{{ cv.pk }}" type="text" name="full_name" value="{{ cv.full_name }}" maxlength="120" required>
+            <input id="full_name-{{ cv.pk }}" type="text" name="cv-{{ cv.pk }}-full_name" value="{{ cv.full_name }}" maxlength="120" form="setup">
             <label for="email-{{ cv.pk }}">Email</label>
-            <input id="email-{{ cv.pk }}" type="email" name="email" value="{{ cv.email }}" maxlength="254">
+            <input id="email-{{ cv.pk }}" type="text" inputmode="email" name="cv-{{ cv.pk }}-email" value="{{ cv.email }}" maxlength="254" form="setup">
             <label for="phone-{{ cv.pk }}">Phone</label>
-            <input id="phone-{{ cv.pk }}" type="text" name="phone" value="{{ cv.phone }}" maxlength="40">
+            <input id="phone-{{ cv.pk }}" type="text" name="cv-{{ cv.pk }}-phone" value="{{ cv.phone }}" maxlength="40" form="setup">
             <label for="linkedin-{{ cv.pk }}">LinkedIn</label>
-            <input id="linkedin-{{ cv.pk }}" type="text" name="linkedin" value="{{ cv.linkedin }}" maxlength="200">
+            <input id="linkedin-{{ cv.pk }}" type="text" name="cv-{{ cv.pk }}-linkedin" value="{{ cv.linkedin }}" maxlength="200" form="setup">
             <label for="links-{{ cv.pk }}">Other links, such as GitHub, one per line</label>
-            <textarea id="links-{{ cv.pk }}" name="links" rows="3">{{ cv.links }}</textarea>
+            <textarea id="links-{{ cv.pk }}" name="cv-{{ cv.pk }}-links" rows="3" form="setup">{{ cv.links }}</textarea>
             <label for="country-{{ cv.pk }}">Country it's for</label>
-            <input id="country-{{ cv.pk }}" type="text" name="country" value="{{ cv.country }}" maxlength="60" list="country-names" placeholder="Leave empty if it isn't for one country">
+            <input id="country-{{ cv.pk }}" type="text" name="cv-{{ cv.pk }}-country" value="{{ cv.country }}" maxlength="60" list="country-names" placeholder="Leave empty if it isn't for one country" form="setup">
             {% if accounts %}
             <label for="send_from-{{ cv.pk }}">Sends from</label>
-            <select id="send_from-{{ cv.pk }}" name="send_from">
+            <select id="send_from-{{ cv.pk }}" name="cv-{{ cv.pk }}-send_from" form="setup">
               <option value="">Automatic: {{ cv.auto_account|default:"none matches its email, so choose one" }}</option>
               {% for account in accounts %}<option value="{{ account }}"{% if account == cv.chosen_account %} selected{% endif %}>{{ account }}</option>{% endfor %}
             </select>
             {% endif %}
             {% if cv.shares_email %}<p class="small muted" style="margin-top:6px">Another CV has the same email address, so a job only ever gets one of them.</p>{% elif cv.shares_account %}<p class="small muted" style="margin-top:6px">Another CV sends from the same Gmail account, so a job only ever gets one of them.</p>{% endif %}
             <label for="facts-{{ cv.pk }}">About you, for jobs that get this CV</label>
-            <textarea id="facts-{{ cv.pk }}" name="facts" rows="9">{{ cv.facts_text }}</textarea>
-            <div class="actions">
-              <button type="submit" class="secondary">Save</button>
-              <button type="submit" class="secondary" form="remove-{{ cv.pk }}">Remove CV</button>
-            </div>
-          </form>
-          <form id="remove-{{ cv.pk }}" method="post" action="{% url 'delete_resume' cv.pk %}">{% csrf_token %}</form>
+            <textarea id="facts-{{ cv.pk }}" name="cv-{{ cv.pk }}-facts" rows="9" form="setup">{{ cv.facts_text }}</textarea>
+          </div>
+          <form method="post" action="{% url 'delete_resume' cv.pk %}" class="actions">{% csrf_token %}<button type="submit" class="secondary">Remove CV</button></form>
         </details>
         {% endfor %}
         <datalist id="country-names">{% for name in country_names %}<option value="{{ name }}">{% endfor %}</datalist>
@@ -73,31 +68,21 @@
       <section>
         <h3>Where you'll work</h3>
         <p class="small muted">Now: {{ profile.rule_summary }}. Separate places with commas.</p>
-        <form method="post" action="{% url 'save_rules' %}">
-          {% csrf_token %}
-          <label for="onsite_places">On-site, hybrid or remote are all fine in</label>
-          <input id="onsite_places" type="text" name="onsite_places" value="{{ profile.onsite_places }}" maxlength="300" placeholder="Leave empty for remote jobs only">
-          <label for="remote_countries">Anywhere else, fully remote jobs open to people in</label>
-          <input id="remote_countries" type="text" name="remote_countries" value="{{ profile.remote_countries }}" maxlength="300" placeholder="Leave empty for any country">
-          <label class="checkbox">
-            <input type="checkbox" name="cv_per_country" {% if profile.cv_per_country %}checked{% endif %}>
-            <span>One CV per country: when a remote job is open to people anywhere, also apply with the best CV of each of your other countries that scores {{ min_score }} or more and has its own email address and Gmail account. Each goes as a separate application.</span>
-          </label>
-          <div class="actions"><button type="submit" class="secondary">Save job rules</button></div>
-        </form>
-        {% if resumes %}
+        <label for="onsite_places">On-site, hybrid or remote are all fine in</label>
+        <input id="onsite_places" type="text" name="onsite_places" value="{{ profile.onsite_places }}" maxlength="300" placeholder="Leave empty for remote jobs only" form="setup">
+        <label for="remote_countries">Anywhere else, fully remote jobs open to people in</label>
+        <input id="remote_countries" type="text" name="remote_countries" value="{{ profile.remote_countries }}" maxlength="300" placeholder="Leave empty for any country" form="setup">
+        <label class="checkbox">
+          <input type="checkbox" name="cv_per_country" form="setup" {% if profile.cv_per_country %}checked{% endif %}>
+          <span>One CV per country: when a remote job is open to people anywhere, also apply with the best CV of each of your other countries that scores {{ min_score }} or more and has its own email address and Gmail account. Each goes as a separate application.</span>
+        </label>
         <div class="subsection">
           <h3>You</h3>
-          <form method="post" action="{% url 'save_profile' %}">
-            {% csrf_token %}
-            <label class="checkbox">
-              <input type="checkbox" name="allow_consent" {% if profile.allow_consent %}checked{% endif %}>
-              <span>Tick required privacy and data consent boxes for me. Without this, forms that have one come back to you.</span>
-            </label>
-            <div class="actions"><button type="submit" class="secondary">Save</button></div>
-          </form>
+          <label class="checkbox">
+            <input type="checkbox" name="allow_consent" form="setup" {% if profile.allow_consent %}checked{% endif %}>
+            <span>Tick required privacy and data consent boxes for me. Without this, forms that have one come back to you.</span>
+          </label>
         </div>
-        {% endif %}
       </section>
 
       <section>
@@ -137,11 +122,16 @@
           <label for="key">API key</label>
           <input id="key" type="password" name="key" autocomplete="new-password" required>
           <p class="small muted" style="margin-top:6px"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get a key from Google AI Studio</a></p>
-          <div class="actions"><button type="submit">Save key</button></div>
+          <div class="actions"><button type="submit">Connect Gemini</button></div>
         </form>
       </section>
       {% endif %}
     </div>
+    <form id="setup" method="post" action="{% url 'save_setup' %}" class="save-bar">
+      {% csrf_token %}
+      <span class="small muted">Saves every CV's details, your job rules and the consent box together.</span>
+      <button type="submit">Save setup</button>
+    </form>
   </details>
 
   <div class="grid">
