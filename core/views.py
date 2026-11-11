@@ -5,6 +5,7 @@ from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator, validate_email
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET, require_POST
@@ -54,7 +55,7 @@ def _render_home(request, **context):
             "resumes": resumes,
             "missing": missing,
             "attention": attention,
-            "setup_open": bool(missing or attention) or any(not cv.facts for cv in resumes),
+            "setup_open": bool(missing or attention or context.get("add_gmail")) or any(not cv.facts for cv in resumes),
             "accounts": accounts,
             "max_accounts": mailer.MAX_ACCOUNTS,
             "country_names": countries.NAMES,
@@ -68,7 +69,22 @@ def _render_home(request, **context):
 
 @require_GET
 def home(request):
-    return _render_home(request)
+    return _render_home(request, add_gmail=request.GET.get("add") == "gmail")
+
+
+def _filters():
+    """The activity tabs: (key, label, rows). Plain links, so the list refreshes itself on the tab you chose."""
+    midnight = timezone.localtime().replace(hour=0, minute=0, second=0, microsecond=0)
+    everything = Application.objects.all()
+    return [
+        ("all", "All", everything),
+        ("today", "sent today", everything.filter(status=Status.SENT, sent_at__gte=midnight)),
+        ("sent", "sent in total", everything.filter(status=Status.SENT)),
+        ("ready", "ready to send", everything.filter(status=Status.READY)),
+        ("you", "need you", everything.filter(status__in=[Status.MANUAL, Status.NEEDS_YOU])),
+        ("skipped", "skipped", everything.filter(status=Status.SKIPPED)),
+        ("failed", "failed", everything.filter(status=Status.FAILED)),
+    ]
 
 
 @require_GET
@@ -77,11 +93,15 @@ def activity(request):
     """Shown in an iframe so it can refresh itself without touching the forms around it."""
     pipeline.recover_interrupted()
     pipeline.ensure_form_worker()
-    applications = list(Application.objects.select_related("resume")[:200])
-    runs = list(CrawlRun.objects.all()[:5])
-    busy = any(app.in_flight for app in applications) or any(
-        run.status == CrawlRun.Status.RUNNING for run in runs
-    )
+    filters = _filters()
+    show = request.GET.get("show", "all")
+    if show not in {key for key, _, _ in filters}:
+        show = "all"
+    rows = next(rows for key, _, rows in filters if key == show)
+    applications = list(rows.select_related("resume")[:200])
+    runs = list(CrawlRun.objects.all()[:5]) if show == "all" else []
+    working = Application.objects.filter(status__in=IN_FLIGHT).exists()
+    busy = working or CrawlRun.objects.filter(status=CrawlRun.Status.RUNNING).exists()
     return render(
         request,
         "core/activity.html",
@@ -89,11 +109,9 @@ def activity(request):
             "applications": applications,
             "runs": runs,
             "busy": busy,
-            "sent_today": pipeline.sent_today(),
+            "show": show,
+            "tabs": [(key, label, rows.count()) for key, label, rows in filters],
             "daily_limit": pipeline.daily_limit(),
-            "total_sent": Application.objects.filter(status=Status.SENT).count(),
-            "manual_count": Application.objects.filter(status__in=[Status.MANUAL, Status.NEEDS_YOU]).count(),
-            "ready_count": Application.objects.filter(status=Status.READY).count(),
         },
     )
 
@@ -213,23 +231,29 @@ def connect_gmail(request):
         validate_email(address)
     except ValidationError:
         messages.error(request, "Enter a valid Gmail address.")
-        return redirect("home")
+        return _back_to_gmail()
     if not password:
         messages.error(request, "Enter your Gmail App Password.")
-        return redirect("home")
+        return _back_to_gmail()
     slot = mailer.slot_for(address)
     if slot is None:
         messages.error(request, f"You can connect up to {mailer.MAX_ACCOUNTS} Gmail accounts. Remove one first.")
-        return redirect("home")
+        return _back_to_gmail()
     try:
         mailer.verify(address, password)
     except mailer.MailError as exc:
         messages.error(request, str(exc))
+        return _back_to_gmail()
     else:
         user_key, secret_key = mailer.env_keys(slot)
         _save_env(**{user_key: address, secret_key: password})
         messages.success(request, f"Gmail connected as {address}.{_waiting_for_an_account()}")
     return redirect("home")
+
+
+def _back_to_gmail():
+    """Back to the open Add a Gmail account form, so a mistake is quick to fix."""
+    return redirect(f"{reverse('home')}?add=gmail#add-gmail")
 
 
 def _waiting_for_an_account():

@@ -393,7 +393,7 @@ class ViewTests(FlowTestCase):
         self.app(status=Status.NEEDS_YOU)
         response = self.client.get(reverse("activity"))
         self.assertNotContains(response, 'http-equiv="refresh"')
-        self.assertEqual(response.context["manual_count"], 1)
+        self.assertEqual(dict((key, count) for key, _, count in response.context["tabs"])["you"], 1)
 
     def test_activity_restarts_a_queue_left_after_a_restart(self):
         self.app(status=Status.FORM_QUEUE)

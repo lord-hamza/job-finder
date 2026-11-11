@@ -1,10 +1,12 @@
 import os
+from datetime import timedelta
 from unittest import mock
 
 from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 from django.urls import reverse
+from django.utils import timezone
 
 from core import llm, mailer, pipeline
 from core.models import Application, CrawlRun, Profile, Resume
@@ -45,7 +47,8 @@ class HomeTests(ViewTestCase):
 
     def test_keys_already_connected_arent_asked_for_again(self):
         response = self.client.get(reverse("home"))
-        self.assertContains(response, "Another Gmail address")  # more accounts can always be added
+        self.assertContains(response, "Add another Gmail account")  # more accounts can always be added
+        self.assertNotContains(response, '<details id="add-gmail" class="add-account" open>')
         self.assertNotContains(response, 'name="key"')
         self.assertContains(response, "Gemini connected")
 
@@ -131,12 +134,43 @@ class ActivityTests(ViewTestCase):
         self.assertNotContains(response, "<script>alert")
         self.assertNotContains(response, "<img src=x")
 
+    def counts(self, response):
+        return {key: count for key, _, count in response.context["tabs"]}
+
     def test_counts(self):
         self.app(status=Status.READY)
         self.app(status=Status.MANUAL)
-        response = self.client.get(reverse("activity"))
-        self.assertEqual(response.context["ready_count"], 1)
-        self.assertEqual(response.context["manual_count"], 1)
+        self.app(status=Status.NEEDS_YOU)
+        self.app(status=Status.SENT, sent_at=timezone.now() - timedelta(days=2))
+        self.app(status=Status.SENT, sent_at=timezone.now())
+        self.app(status=Status.FAILED)
+        counts = self.counts(self.client.get(reverse("activity")))
+        self.assertEqual(counts, {"all": 6, "today": 1, "sent": 2, "ready": 1, "you": 2, "skipped": 0, "failed": 1})
+
+    def test_tabs_filter_the_list(self):
+        ready = self.app(status=Status.READY, title="Ready one")
+        failed = self.app(status=Status.FAILED, title="Failed one")
+        old = self.app(status=Status.SENT, title="Sent long ago", sent_at=timezone.now() - timedelta(days=2))
+        new = self.app(status=Status.SENT, title="Sent just now", sent_at=timezone.now())
+        expected = {"all": {ready, failed, old, new}, "ready": {ready}, "failed": {failed}, "sent": {old, new},
+                    "today": {new}, "you": set(), "nonsense": {ready, failed, old, new}}
+        for show, apps in expected.items():
+            with self.subTest(show):
+                response = self.client.get(reverse("activity"), {"show": show})
+                self.assertEqual(set(response.context["applications"]), apps)
+        response = self.client.get(reverse("activity"), {"show": "failed"})
+        self.assertContains(response, '<a href="?show=failed" class="tab current" aria-current="page">')
+        self.assertContains(response, '<a href="?show=ready" class="tab">')
+        self.assertContains(self.client.get(reverse("activity"), {"show": "you"}), "Nothing here.")
+
+    def test_a_filtered_tab_still_refreshes_while_work_goes_on(self):
+        self.app(status=Status.PROCESSING)
+        self.assertContains(self.client.get(reverse("activity"), {"show": "failed"}), 'http-equiv="refresh"')
+
+    def test_crawl_runs_show_on_all_only(self):
+        CrawlRun.objects.create(url="https://x.example/jobs", status=CrawlRun.Status.DONE)
+        self.assertContains(self.client.get(reverse("activity")), "https://x.example/jobs")
+        self.assertNotContains(self.client.get(reverse("activity"), {"show": "sent"}), "https://x.example/jobs")
 
 
 class UploadTests(AppTestCase):

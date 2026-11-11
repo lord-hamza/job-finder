@@ -471,3 +471,36 @@ class IdentityMigrationTests(TransactionTestCase):
     def test_no_cvs_is_fine(self):
         self.migrate(lambda old: old.get_model("core", "Profile").objects.create(full_name="Sam"))
         self.assertFalse(Resume.objects.exists())
+
+
+class AddGmailTests(AppTestCase):
+    def setUp(self):
+        super().setUp()
+        self.make_profile()
+
+    def test_the_plus_opens_setup_at_the_form(self):
+        home = self.client.get(reverse("home"))
+        self.assertContains(home, 'href="/?add=gmail#add-gmail"')
+        self.assertContains(home, 'aria-label="Add a Gmail account">+</a>')
+        page = self.client.get(reverse("home"), {"add": "gmail"})
+        self.assertTrue(page.context["setup_open"])
+        self.assertContains(page, '<details id="add-gmail" class="add-account" open>')
+
+    def test_no_plus_once_every_slot_is_used(self):
+        full = {f"GMAIL_ADDRESS_{n}": f"a{n}@gmail.com" for n in range(2, mailer.MAX_ACCOUNTS + 1)}
+        full.update({f"GMAIL_APP_PASSWORD_{n}": "x" for n in range(2, mailer.MAX_ACCOUNTS + 1)})
+        with mock.patch.dict(os.environ, full):
+            home = self.client.get(reverse("home"))
+        self.assertNotContains(home, "add=gmail")
+        self.assertNotContains(home, 'id="add-gmail"')
+
+    def test_a_failed_login_comes_back_to_the_open_form(self):
+        with mock.patch("core.mailer.verify", side_effect=mailer.MailError("Gmail rejected the login")):
+            response = self.client.post(reverse("connect_gmail"), {"address": "new@gmail.com", "password": "bad"})
+        self.assertEqual(response["Location"], "/?add=gmail#add-gmail")
+
+    def test_without_any_account_the_form_is_already_open(self):
+        with mock.patch.dict(os.environ, {"GMAIL_ADDRESS": "", "GMAIL_APP_PASSWORD": ""}):
+            page = self.client.get(reverse("home"))
+        self.assertContains(page, '<details id="add-gmail" class="add-account" open>')
+        self.assertContains(page, "Add a Gmail account</summary>")

@@ -4,12 +4,11 @@
 {% block body_attrs %} class="embedded"{% endblock %}
 {% block body %}
 <div class="embedded-wrap">
-  <div class="stats">
-    <span><strong class="num">{{ sent_today }}</strong><span class="muted"> / {{ daily_limit }} sent today</span></span>
-    <span><strong class="num">{{ total_sent }}</strong><span class="muted"> sent in total</span></span>
-    <span><strong class="num">{{ ready_count }}</strong><span class="muted"> ready to send</span></span>
-    <span><strong class="num">{{ manual_count }}</strong><span class="muted"> need you</span></span>
-  </div>
+  <nav class="tabs" aria-label="Show">
+    {% for key, label, count in tabs %}
+    <a href="?show={{ key }}" class="tab{% if key == show %} current{% endif %}"{% if key == show %} aria-current="page"{% endif %}>{% if key == "all" %}{{ label }} <span class="num">{{ count }}</span>{% else %}<strong class="num">{{ count }}</strong>{% if key == "today" %} / {{ daily_limit }}{% endif %} {{ label }}{% endif %}</a>
+    {% endfor %}
+  </nav>
 
   {% for run in runs %}
     <div class="run">
@@ -42,8 +41,10 @@
       {% endfor %}
     </tbody>
   </table>
-  {% else %}
+  {% elif show == "all" %}
   <p class="muted">Nothing here yet. Paste a job description or add a link above and it will show up here.</p>
+  {% else %}
+  <p class="muted">Nothing here. <a href="?show=all">Show all</a></p>
   {% endif %}
 </div>
 {% endblock %}

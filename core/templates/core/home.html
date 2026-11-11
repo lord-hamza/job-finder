@@ -5,7 +5,7 @@
     <h1>Job Finder</h1>
     <div class="chips">
       <span class="chip {% if resumes %}yes{% else %}no{% endif %}">{% if resumes %}{{ resumes|length }} CV{{ resumes|length|pluralize }} ready{% else %}CV missing{% endif %}</span>
-      <span class="chip {% if gmail_connected %}yes{% else %}no{% endif %}">{% if gmail_connected %}{{ accounts|length }} Gmail account{{ accounts|length|pluralize }}{% else %}Gmail not connected{% endif %}</span>
+      <span class="chip-group"><span class="chip {% if gmail_connected %}yes{% else %}no{% endif %}">{% if gmail_connected %}{{ accounts|length }} Gmail account{{ accounts|length|pluralize }}{% else %}Gmail not connected{% endif %}</span>{% if accounts|length < max_accounts %}<a class="chip add" href="{% url 'home' %}?add=gmail#add-gmail" title="Add a Gmail account" aria-label="Add a Gmail account">+</a>{% endif %}</span>
       <span class="chip {% if gemini_connected %}yes{% else %}no{% endif %}">Gemini {% if gemini_connected %}connected{% else %}not connected{% endif %}</span>
     </div>
   </header>
@@ -114,15 +114,18 @@
         </ul>
         {% endif %}
         {% if accounts|length < max_accounts %}
-        <form method="post" action="{% url 'connect_gmail' %}" autocomplete="off">
-          {% csrf_token %}
-          <label for="address">{% if accounts %}Another Gmail address{% else %}Gmail address{% endif %}</label>
-          <input id="address" type="email" name="address" required>
-          <label for="password">App Password</label>
-          <input id="password" type="password" name="password" autocomplete="new-password" required>
-          <p class="small muted" style="margin-top:6px">Your normal password won't work. <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">Create an App Password</a> (needs 2-Step Verification on).</p>
-          <div class="actions"><button type="submit"{% if accounts %} class="secondary"{% endif %}>Connect Gmail</button></div>
-        </form>
+        <details id="add-gmail" class="add-account"{% if not accounts or add_gmail %} open{% endif %}>
+          <summary><span class="plus" aria-hidden="true">+</span> Add a{% if accounts %}nother{% endif %} Gmail account</summary>
+          <form method="post" action="{% url 'connect_gmail' %}" autocomplete="off">
+            {% csrf_token %}
+            <label for="address">Gmail address</label>
+            <input id="address" type="email" name="address" required{% if add_gmail %} autofocus{% endif %}>
+            <label for="password">App Password</label>
+            <input id="password" type="password" name="password" autocomplete="new-password" required>
+            <p class="small muted" style="margin-top:6px">Your normal password won't work. <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">Create an App Password</a> (needs 2-Step Verification on). You can connect up to {{ max_accounts }}.</p>
+            <div class="actions"><button type="submit">Connect Gmail</button></div>
+          </form>
+        </details>
         {% endif %}
       </section>
 
