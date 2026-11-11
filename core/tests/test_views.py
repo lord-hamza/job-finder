@@ -91,7 +91,7 @@ class HomeTests(ViewTestCase):
     def test_post_routes_refuse_get(self):
         app = self.app()
         for url in (
-            reverse("upload_resume"), reverse("save_setup"),
+            reverse("save_setup"),
             reverse("connect_gmail"), reverse("save_gemini"),
             reverse("apply_jd"), reverse("start_crawl"), reverse("send", args=[app.pk]), reverse("retry", args=[app.pk]),
         ):
@@ -175,18 +175,26 @@ class ActivityTests(ViewTestCase):
 
 class UploadTests(AppTestCase):
     def upload(self, name, data):
-        return self.client.post(reverse("upload_resume"), {"resume": SimpleUploadedFile(name, data)}, follow=True)
+        return self.client.post(reverse("save_setup"), {**self.setup_form(), "resume": SimpleUploadedFile(name, data)}, follow=True)
 
     def test_good_upload(self):
         details = {"full_name": "Sam Taylor", "phone": "", "linkedin": ""}
         with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
             with mock.patch("core.llm.generate_json", return_value=details):
                 response = self.upload("cv.pdf", minimal_pdf("x"))
-        self.assertContains(response, "CV saved")
+        self.assertContains(response, "1 CV uploaded")
         self.assertTrue(Resume.objects.filter(name="cv.pdf").exists())
 
-    def test_no_file(self):
-        self.assertContains(self.client.post(reverse("upload_resume"), follow=True), "Choose a PDF")
+    def test_saving_without_a_file_just_saves(self):
+        response = self.client.post(reverse("save_setup"), self.setup_form(), follow=True)
+        self.assertContains(response, "Setup saved.")
+        self.assertNotContains(response, "CV uploaded")
+
+    def test_the_file_box_belongs_to_the_one_save(self):
+        page = self.client.get(reverse("home")).content.decode()
+        self.assertIn('type="file" name="resume" accept=".pdf,.docx" multiple form="setup"', page)
+        self.assertIn('enctype="multipart/form-data" class="save-bar"', page)
+        self.assertNotIn("Upload CVs", page)
 
     def test_wrong_type(self):
         self.assertContains(self.upload("cv.exe", b"MZ"), "PDF or a Word")
@@ -636,4 +644,4 @@ class OneSaveTests(ViewTestCase):
         self.assertEqual(page.count("Save setup"), 1)
         self.assertNotIn(">Save<", page)
         self.assertNotIn("Save job rules", page)
-        self.assertEqual(page.count('form="setup"'), page.count('name="cv-') + 4)  # every CV field, two rules, two boxes
+        self.assertEqual(page.count('form="setup"'), page.count('name="cv-') + 5)  # every CV field, rules, boxes, files

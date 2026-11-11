@@ -5,7 +5,6 @@ from core import views
 urlpatterns = [
     path("", views.home, name="home"),
     path("activity/", views.activity, name="activity"),
-    path("resume/", views.upload_resume, name="upload_resume"),
     path("resume/<int:pk>/delete/", views.delete_resume, name="delete_resume"),
     path("setup/", views.save_setup, name="save_setup"),
     path("gmail/", views.connect_gmail, name="connect_gmail"),

@@ -173,11 +173,11 @@ class UploadManyTests(CvTestCase):
     def upload(self, *names):
         files = [SimpleUploadedFile(name, b"%PDF " + name.encode()) for name in names]
         with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):
-            return self.client.post(reverse("upload_resume"), {"resume": files}, follow=True)
+            return self.client.post(reverse("save_setup"), {**self.setup_form(), "resume": files}, follow=True)
 
     def test_several_at_once(self):
         response = self.upload("bd.pdf", "seo.docx")
-        self.assertContains(response, "2 CVs saved")
+        self.assertContains(response, "2 CVs uploaded")
         self.assertEqual(Resume.objects.count(), 4)
 
     def test_same_name_replaces(self):
@@ -188,9 +188,20 @@ class UploadManyTests(CvTestCase):
     def test_one_bad_file_doesnt_stop_the_rest(self):
         files = [SimpleUploadedFile("bad.exe", b"MZ"), SimpleUploadedFile("bd.pdf", b"%PDF bd")]
         with mock.patch("core.pipeline.resume.extract_text", side_effect=[pipeline.resume.ResumeError("nope"), CV_TEXT]):
-            response = self.client.post(reverse("upload_resume"), {"resume": files}, follow=True)
+            response = self.client.post(reverse("save_setup"), {**self.setup_form(), "resume": files}, follow=True)
         self.assertContains(response, "bad.exe: nope")
         self.assertTrue(Resume.objects.filter(name="bd.pdf").exists())
+
+    def test_a_new_version_chosen_with_edits_keeps_the_edits_and_takes_its_own_details(self):
+        old_text = "Sam Taylor\n07000 000000\nWordPress developer. " * 10  # the phone the old file showed
+        Resume.objects.filter(pk=self.wp.pk).update(text=old_text, phone="07000 000000")
+        data = self.setup_form(self.wp, facts="Where I live now: Lahore")
+        data["resume"] = SimpleUploadedFile("wordpress.pdf", b"%PDF new")
+        with mock.patch("core.pipeline.resume.extract_text", return_value=CV_TEXT):  # the new file shows +44
+            response = self.client.post(reverse("save_setup"), data, follow=True)
+        self.assertContains(response, "Setup saved.")
+        self.wp.refresh_from_db()
+        self.assertEqual((self.wp.facts, self.wp.phone, bytes(self.wp.data)), ("Where I live now: Lahore", "+44 7700 900123", b"%PDF new"))
 
     def test_there_is_a_limit(self):
         for number in range(Resume.MAX_COUNT - 2):

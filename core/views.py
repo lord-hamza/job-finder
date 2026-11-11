@@ -117,38 +117,6 @@ def activity(request):
 
 
 @require_POST
-def upload_resume(request):
-    uploads = request.FILES.getlist("resume")
-    if not uploads:
-        messages.error(request, "Choose a PDF or Word .docx file first.")
-    saved, replaced = 0, []
-    for upload in uploads:
-        try:
-            if upload.size > resume.MAX_BYTES:
-                raise resume.ResumeError("That file is over 10 MB, which is too big to attach to an application.")
-            cv = pipeline.save_resume(upload.name, upload.read())
-        except resume.ResumeError as exc:
-            messages.error(request, f"{upload.name}: {exc}" if len(uploads) > 1 else str(exc))
-        else:
-            saved += 1
-            if cv.replaced:
-                replaced.append(cv.name)
-    if saved:
-        cvs = "CV" if saved == 1 else f"{saved} CVs"
-        messages.success(
-            request,
-            f"{cvs} saved. Check the name, contact details and country read from each below, and fill in its About you.",
-        )
-    if replaced:
-        messages.info(
-            request,
-            f"Replaced {', '.join(replaced)}, keeping the facts you'd saved and anything you typed. "
-            "If it's a different CV, check them.",
-        )
-    return redirect("home")
-
-
-@require_POST
 def delete_resume(request, pk):
     Resume.objects.filter(pk=pk).delete()
     messages.success(request, "CV removed.")
@@ -176,7 +144,36 @@ def save_setup(request):
             messages.error(request, f"{cv.name}: {'; and '.join(problems)}. The rest is saved.")
     emails = f" {resigned} unsent email{'s' if resigned > 1 else ''} now signed with the new details." if resigned else ""
     messages.success(request, f"Setup saved.{emails}")
+    _upload(request, request.FILES.getlist("resume"))  # after the details: a new file's own details then win
     return redirect("home")
+
+
+def _upload(request, uploads):
+    """CVs chosen in Setup. A file with the same name replaces that CV, keeping its facts and anything you typed."""
+    saved, replaced = 0, []
+    for upload in uploads:
+        try:
+            if upload.size > resume.MAX_BYTES:
+                raise resume.ResumeError("That file is over 10 MB, which is too big to attach to an application.")
+            cv = pipeline.save_resume(upload.name, upload.read())
+        except resume.ResumeError as exc:
+            messages.error(request, f"{upload.name}: {exc}")
+        else:
+            saved += 1
+            if cv.replaced:
+                replaced.append(cv.name)
+    if saved:
+        cvs = "1 CV" if saved == 1 else f"{saved} CVs"
+        messages.success(
+            request,
+            f"{cvs} uploaded. Check the name, contact details and country read from each below, and fill in its About you.",
+        )
+    if replaced:
+        messages.info(
+            request,
+            f"Replaced {', '.join(replaced)}, keeping the facts you'd saved and anything you typed. "
+            "If it's a different CV, check them.",
+        )
 
 
 def _places(text):

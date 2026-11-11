@@ -57,12 +57,8 @@
         </details>
         {% endfor %}
         <datalist id="country-names">{% for name in country_names %}<option value="{{ name }}">{% endfor %}</datalist>
-        <form method="post" action="{% url 'upload_resume' %}" enctype="multipart/form-data">
-          {% csrf_token %}
-          <label for="resume">PDF or Word .docx, up to 10 MB each. A file with the same name replaces the old one.</label>
-          <input id="resume" type="file" name="resume" accept=".pdf,.docx" multiple required>
-          <div class="actions"><button type="submit">Upload CVs</button></div>
-        </form>
+        <label for="resume">Add CVs: PDF or Word .docx, up to 10 MB each. A file with the same name replaces the old one. They're uploaded when you save.</label>
+        <input id="resume" type="file" name="resume" accept=".pdf,.docx" multiple form="setup">
       </section>
 
       <section>
@@ -127,9 +123,9 @@
       </section>
       {% endif %}
     </div>
-    <form id="setup" method="post" action="{% url 'save_setup' %}" class="save-bar">
+    <form id="setup" method="post" action="{% url 'save_setup' %}" enctype="multipart/form-data" class="save-bar">
       {% csrf_token %}
-      <span class="small muted">Saves every CV's details, your job rules and the consent box together.</span>
+      <span class="small muted">Saves every CV's details, your job rules and the consent box together, and uploads any CVs you chose.</span>
       <button type="submit">Save setup</button>
     </form>
   </details>
