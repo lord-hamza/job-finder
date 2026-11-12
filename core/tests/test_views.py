@@ -645,3 +645,46 @@ class OneSaveTests(ViewTestCase):
         self.assertNotIn(">Save<", page)
         self.assertNotIn("Save job rules", page)
         self.assertEqual(page.count('form="setup"'), page.count('name="cv-') + 5)  # every CV field, rules, boxes, files
+
+
+class SearchTests(ViewTestCase):
+    def setUp(self):
+        super().setUp()
+        self.acme_sent = self.app(status=Status.SENT, company="Acme Ltd", title="AI Engineer", sent_at=timezone.now())
+        self.acme_skipped = self.app(status=Status.SKIPPED, company="ACME Ltd", title="Data Engineer")
+        self.globex = self.app(status=Status.READY, company="Globex", title="Backend Developer", recipient="jobs@globex.io")
+        self.no_company = self.app(status=Status.FAILED, company="", title="", recipient="", job_url="https://careers.initech.com/42")
+
+    def search(self, q, show=None):
+        params = {"q": q, **({"show": show} if show else {})}
+        return self.client.get(reverse("activity"), params)
+
+    def test_finds_a_company_however_its_typed(self):
+        response = self.search("  acme ")
+        self.assertEqual(set(response.context["applications"]), {self.acme_sent, self.acme_skipped})
+        self.assertContains(response, 'Jobs matching "acme"')
+
+    def test_also_finds_by_job_title_address_or_link(self):
+        for q, app in (("backend", self.globex), ("globex.io", self.globex), ("initech", self.no_company)):
+            with self.subTest(q):
+                self.assertEqual(list(self.search(q).context["applications"]), [app])
+
+    def test_tabs_count_and_keep_the_search(self):
+        response = self.search("acme")
+        counts = {key: count for key, _, count in response.context["tabs"]}
+        self.assertEqual((counts["all"], counts["sent"], counts["skipped"], counts["ready"]), (2, 1, 1, 0))
+        self.assertContains(response, 'href="?show=sent&amp;q=acme"')
+        self.assertEqual(list(self.search("acme", show="sent").context["applications"]), [self.acme_sent])
+
+    def test_nothing_found_says_so(self):
+        self.assertContains(self.search("umbrella"), 'Nothing matches "umbrella". You haven\'t added a job from it yet.')
+        self.assertContains(self.search("globex", show="sent"), "Look in all")
+
+    def test_the_search_is_escaped(self):
+        response = self.search('<script>alert(1)</script>')
+        self.assertNotContains(response, "<script>alert")
+
+    def test_the_box_sends_its_search_into_the_list(self):
+        home = self.client.get(reverse("home"))
+        self.assertContains(home, f'action="{reverse("activity")}" target="activity" role="search"')
+        self.assertContains(home, '<iframe class="activity" name="activity"')

@@ -6,9 +6,10 @@
 <div class="embedded-wrap">
   <nav class="tabs" aria-label="Show">
     {% for key, label, count in tabs %}
-    <a href="?show={{ key }}" class="tab{% if key == show %} current{% endif %}"{% if key == show %} aria-current="page"{% endif %}>{% if key == "all" %}{{ label }} <span class="num">{{ count }}</span>{% else %}<strong class="num">{{ count }}</strong>{% if key == "today" %} / {{ daily_limit }}{% endif %} {{ label }}{% endif %}</a>
+    <a href="?show={{ key }}{% if search %}&amp;q={{ search|urlencode }}{% endif %}" class="tab{% if key == show %} current{% endif %}"{% if key == show %} aria-current="page"{% endif %}>{% if key == "all" %}{{ label }} <span class="num">{{ count }}</span>{% else %}<strong class="num">{{ count }}</strong>{% if key == "today" %} / {{ daily_limit }}{% endif %} {{ label }}{% endif %}</a>
     {% endfor %}
   </nav>
+  {% if search %}<p class="small muted">Jobs matching "{{ search }}". <a href="?show={{ show }}">Clear the search</a></p>{% endif %}
 
   {% for run in runs %}
     <div class="run">
@@ -41,6 +42,8 @@
       {% endfor %}
     </tbody>
   </table>
+  {% elif search %}
+  <p class="muted">Nothing matches "{{ search }}"{% if show != "all" %} here. <a href="?show=all&amp;q={{ search|urlencode }}">Look in all</a>{% else %}. You haven't added a job from it yet{% endif %}.</p>
   {% elif show == "all" %}
   <p class="muted">Nothing here yet. Paste a job description or add a link above and it will show up here.</p>
   {% else %}

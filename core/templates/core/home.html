@@ -162,6 +162,14 @@
     </section>
   </div>
 
-  <iframe class="activity" src="{% url 'activity' %}" title="Activity"></iframe>
+  <div class="activity-head">
+    <h2>Activity</h2>
+    <form method="get" action="{% url 'activity' %}" target="activity" role="search" class="search">
+      <label for="q" class="hidden-label">Search companies</label>
+      <input id="q" type="search" name="q" maxlength="100" placeholder="Search a company, job or address">
+      <button type="submit" class="secondary">Search</button>
+    </form>
+  </div>
+  <iframe class="activity" name="activity" src="{% url 'activity' %}" title="Activity"></iframe>
 </main>
 {% endblock %}

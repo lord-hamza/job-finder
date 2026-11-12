@@ -4,6 +4,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator, validate_email
+from django.db.models import Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -72,10 +73,16 @@ def home(request):
     return _render_home(request, add_gmail=request.GET.get("add") == "gmail")
 
 
-def _filters():
-    """The activity tabs: (key, label, rows). Plain links, so the list refreshes itself on the tab you chose."""
+def _filters(search=""):
+    """The activity tabs: (key, label, rows). Plain links, so the list refreshes itself on the tab you chose.
+    search: only jobs whose company, title, recipient or link contains it."""
     midnight = timezone.localtime().replace(hour=0, minute=0, second=0, microsecond=0)
     everything = Application.objects.all()
+    if search:
+        everything = everything.filter(
+            Q(company__icontains=search) | Q(title__icontains=search) | Q(recipient__icontains=search)
+            | Q(job_url__icontains=search)
+        )
     return [
         ("all", "All", everything),
         ("today", "sent today", everything.filter(status=Status.SENT, sent_at__gte=midnight)),
@@ -93,13 +100,14 @@ def activity(request):
     """Shown in an iframe so it can refresh itself without touching the forms around it."""
     pipeline.recover_interrupted()
     pipeline.ensure_form_worker()
-    filters = _filters()
+    search = " ".join(request.GET.get("q", "").split())[:100]
+    filters = _filters(search)
     show = request.GET.get("show", "all")
     if show not in {key for key, _, _ in filters}:
         show = "all"
     rows = next(rows for key, _, rows in filters if key == show)
     applications = list(rows.select_related("resume")[:200])
-    runs = list(CrawlRun.objects.all()[:5]) if show == "all" else []
+    runs = list(CrawlRun.objects.all()[:5]) if show == "all" and not search else []
     working = Application.objects.filter(status__in=IN_FLIGHT).exists()
     busy = working or CrawlRun.objects.filter(status=CrawlRun.Status.RUNNING).exists()
     return render(
@@ -110,6 +118,7 @@ def activity(request):
             "runs": runs,
             "busy": busy,
             "show": show,
+            "search": search,
             "tabs": [(key, label, rows.count()) for key, label, rows in filters],
             "daily_limit": pipeline.daily_limit(),
         },
