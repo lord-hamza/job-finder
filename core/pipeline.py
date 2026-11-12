@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import threading
+import time
 from pathlib import Path
 
 from django.core.exceptions import ValidationError
@@ -12,7 +13,7 @@ from django.db import connections
 from django.db.models import Q
 from django.utils import timezone
 
-from . import countries, crawler, emails, formfill, llm, mailer, prompts, resume
+from . import countries, crawler, emails, formfill, jobtext, llm, mailer, prompts, resume
 from .models import IN_FLIGHT, Application, CrawlRun, Profile, Resume
 
 log = logging.getLogger(__name__)
@@ -827,6 +828,51 @@ def deliver(app_id, by_hand=False):
             app.note = ""
             app.sent_at = timezone.now()
             app.save()
+
+
+# ---------------------------------------------------------------- Job descriptions
+
+
+TIDY_AGAIN_AFTER = 600  # seconds before another try at a job Gemini couldn't tidy
+_tidy_lock = threading.Lock()
+_tidying, _untidy = set(), {}  # jobs Gemini is tidying now, and when it last couldn't
+
+
+def tidy_later(app):
+    """Starts Gemini tidying a job's description the first time you open it, for a crawled page or a paste that
+    brought a whole page with it. Pasted adverts are laid out as they are, without Gemini. True while it runs."""
+    group = app.parent_id or app.pk
+    messy = app.source == Source.CRAWL or jobtext.noisy(app.jd_text)
+    if app.description or not app.jd_text.strip() or not messy or not llm.api_key():
+        return False
+    with _tidy_lock:
+        if group in _tidying:
+            return True
+        if time.monotonic() - _untidy.get(group, -TIDY_AGAIN_AFTER) < TIDY_AGAIN_AFTER:
+            return False
+        _tidying.add(group)
+    spawn(tidy_description, group)
+    return True
+
+
+def tidy_description(group):
+    """One Gemini call, kept only if it holds to the posting's own words. The job's other applications share it.
+    Nobody waits on it, since the page shows the job's own text meanwhile, so it can wait out an overloaded Gemini."""
+    try:
+        text = Application.objects.values_list("jd_text", flat=True).get(pk=group)[:JD_CHARS]
+        raw = llm.generate_json(prompts.tidy_prompt(text), prompts.TIDY_SCHEMA, system=prompts.TIDY_SYSTEM, patient=True)
+        tidied = jobtext.markup(raw.get("blocks"))
+        if tidied and jobtext.faithful(tidied, text):
+            Application.objects.filter(Q(pk=group) | Q(parent_id=group), description="").update(description=tidied)
+        else:
+            log.warning("Gemini's tidied description for job %s strayed from the posting, so it wasn't used", group)
+            _untidy[group] = time.monotonic()
+    except Exception as exc:  # the job's own text still shows, laid out
+        log.warning("Tidying the description for job %s failed: %s", group, exc)
+        _untidy[group] = time.monotonic()
+    finally:
+        with _tidy_lock:
+            _tidying.discard(group)
 
 
 # ---------------------------------------------------------------- Website forms

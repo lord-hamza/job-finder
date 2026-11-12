@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.contrib import messages
@@ -12,7 +13,7 @@ from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET, require_POST
 from dotenv import set_key
 
-from . import countries, emails, llm, mailer, pipeline, prompts, resume
+from . import countries, emails, jobtext, llm, mailer, pipeline, prompts, resume
 from .models import IN_FLIGHT, Application, CrawlRun, Profile, Resume
 
 MIN_JD_CHARS = 100
@@ -102,14 +103,22 @@ def activity(request):
     pipeline.ensure_form_worker()
     search = " ".join(request.GET.get("q", "").split())[:100]
     filters = _filters(search)
+    links = CrawlRun.objects.filter(url__icontains=search) if search else CrawlRun.objects.all()
     show = request.GET.get("show", "all")
-    if show not in {key for key, _, _ in filters}:
+    if show not in {key for key, _, _ in filters} | {"urls"}:
         show = "all"
-    rows = next(rows for key, _, rows in filters if key == show)
-    applications = list(rows.select_related("resume")[:200])
-    runs = list(CrawlRun.objects.all()[:5]) if show == "all" and not search else []
+    if show == "urls":  # links you asked it to find jobs on have a tab of their own
+        applications, runs = [], list(links[:100])
+    else:
+        rows = next(rows for key, _, rows in filters if key == show)
+        applications, runs = list(rows.select_related("resume")[:200]), []
+    for item in [*applications, *runs]:
+        parts = urlsplit(getattr(item, "job_url", "") or getattr(item, "url", ""))
+        item.site = parts.netloc.removeprefix("www.")
+        item.place = f"{parts.path}{'?' + parts.query if parts.query else ''}".rstrip("/")
     working = Application.objects.filter(status__in=IN_FLIGHT).exists()
-    busy = working or CrawlRun.objects.filter(status=CrawlRun.Status.RUNNING).exists()
+    running = CrawlRun.objects.filter(status=CrawlRun.Status.RUNNING).count()
+    busy = working or bool(running)
     return render(
         request,
         "core/activity.html",
@@ -119,7 +128,8 @@ def activity(request):
             "busy": busy,
             "show": show,
             "search": search,
-            "tabs": [(key, label, rows.count()) for key, label, rows in filters],
+            "tabs": [(key, label, rows.count()) for key, label, rows in filters] + [("urls", "URLs", links.count())],
+            "running": running,
             "daily_limit": pipeline.daily_limit(),
         },
     )
@@ -359,12 +369,19 @@ def detail(request, pk):
     related = [
         other for other in [group, *group.extras.select_related("resume").order_by("pk")] if other.pk != app.pk
     ]
+    tidying = pipeline.tidy_later(app)
+    _, posting_facts, description = jobtext.readable(app)
+    editing = bool(app.body) and not app.in_flight and app.status != Status.SENT  # a reload would lose your edits
     return render(
         request,
         "core/detail.html",
         {
             "app": app,
             "related": related,
+            "description": description,
+            "posting_facts": posting_facts,
+            "tidying": tidying,
+            "reload": app.in_flight or (tidying and not editing),
             "attachment": pipeline.attachment_name(app.resume) if app.resume else "",
             "sends_from": pipeline.sender(app.resume) if app.resume else "",
             "was_sending": app.note == pipeline.INTERRUPTED_SEND and app.sender,

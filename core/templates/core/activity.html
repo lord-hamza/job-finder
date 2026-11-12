@@ -6,21 +6,37 @@
 <div class="embedded-wrap">
   <nav class="tabs" aria-label="Show">
     {% for key, label, count in tabs %}
-    <a href="?show={{ key }}{% if search %}&amp;q={{ search|urlencode }}{% endif %}" class="tab{% if key == show %} current{% endif %}"{% if key == show %} aria-current="page"{% endif %}>{% if key == "all" %}{{ label }} <span class="num">{{ count }}</span>{% else %}<strong class="num">{{ count }}</strong>{% if key == "today" %} / {{ daily_limit }}{% endif %} {{ label }}{% endif %}</a>
+    <a href="?show={{ key }}{% if search %}&amp;q={{ search|urlencode }}{% endif %}" class="tab{% if key == show %} current{% endif %}"{% if key == show %} aria-current="page"{% endif %}>{% if key == "all" %}{{ label }} <span class="num">{{ count }}</span>{% elif key == "urls" %}<strong class="num">{{ count }}</strong> {{ label }}{% if running %} <span class="running">· {{ running }} running</span>{% endif %}{% else %}<strong class="num">{{ count }}</strong>{% if key == "today" %} / {{ daily_limit }}{% endif %} {{ label }}{% endif %}</a>
     {% endfor %}
   </nav>
-  {% if search %}<p class="small muted">Jobs matching "{{ search }}". <a href="?show={{ show }}">Clear the search</a></p>{% endif %}
+  {% if search %}<p class="small muted">{% if show == "urls" %}Links{% else %}Jobs{% endif %} matching "{{ search }}". <a href="?show={{ show }}">Clear the search</a></p>{% endif %}
 
-  {% for run in runs %}
-    <div class="run">
-      <span class="chip status-{{ run.status }}">{{ run.get_status_display }}</span>
-      <a href="{{ run.url }}" target="_blank" rel="noopener noreferrer">{{ run.url|truncatechars:70 }}</a>
-      {% if run.status == "running" and run.total %}<span class="muted num">{{ run.done }} of {{ run.total }} jobs</span>{% endif %}
-      {% if run.note %}<div class="muted">{{ run.note }}</div>{% endif %}
-    </div>
-  {% endfor %}
-
-  {% if applications %}
+  {% if show == "urls" %}
+  {% if runs %}
+  <table class="links">
+    <thead>
+      <tr><th>Status</th><th>Link</th><th class="hide-small">Added</th></tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td class="nowrap"><span class="chip status-{{ run.status }}">{{ run.get_status_display }}</span></td>
+        <td>
+          <a href="{{ run.url }}" target="_blank" rel="noopener noreferrer" title="{{ run.url }}"><strong>{{ run.site }}</strong>{% if run.place %}<span class="muted">{{ run.place|truncatechars:60 }}</span>{% endif %}</a>
+          {% if run.status == "running" and run.total %}<span class="small muted num">{{ run.done }} of {{ run.total }} jobs</span>{% endif %}
+          {% if run.note %}<div class="small muted">{{ run.note }}</div>{% endif %}
+        </td>
+        <td class="nowrap muted small hide-small">{{ run.created_at|date:"j M, H:i" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif search %}
+  <p class="muted">No link matches "{{ search }}".</p>
+  {% else %}
+  <p class="muted">No links yet. Add a job board or careers page under Find jobs from a link, and it shows up here.</p>
+  {% endif %}
+  {% elif applications %}
   <table>
     <thead>
       <tr><th>Status</th><th>Job</th><th class="num">Match</th><th class="hide-small">To</th><th class="hide-small">Added</th></tr>
@@ -30,7 +46,7 @@
       <tr>
         <td class="nowrap"><span class="chip status-{{ app.status }}">{{ app.get_status_display }}</span></td>
         <td>
-          <a href="{% url 'detail' app.pk %}" target="_top">{{ app.title|default:app.job_url|default:"Pasted job"|truncatechars:80 }}</a>
+          <a href="{% url 'detail' app.pk %}" target="_top">{% if app.title %}{{ app.title|truncatechars:80 }}{% elif app.site %}<strong>{{ app.site }}</strong><span class="muted">{{ app.place|truncatechars:50 }}</span>{% else %}Pasted job{% endif %}</a>
           {% if app.company %}<span class="muted">at {{ app.company }}</span>{% endif %}
           {% if app.resume %}<span class="small muted">({{ app.resume.name }})</span>{% endif %}
           {% if app.note %}<div class="small muted">{{ app.note }}</div>{% endif %}

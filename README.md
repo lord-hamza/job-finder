@@ -34,7 +34,7 @@ flowchart TD
 | Documents | pypdf, python-docx | Extracts CV text, links and contact details locally, and tells which country a CV is for from its location and phone code. Gemini reads scanned PDFs. |
 | Email | Django mail, Gmail SMTP over SSL | Sends the tailored message with the CV attached, from the Gmail account matching that CV's email. Up to 10 accounts, each with its own App Password. |
 | Background work | Python threads | Crawling, tailoring, sending and form filling run off the request thread. One worker owns the browser, and interrupted work is recovered on restart. |
-| Testing | Django test runner, headless Chrome | 634 tests, including real-browser runs against a local fake job site and deliberately hostile pages. |
+| Testing | Django test runner, headless Chrome | 666 tests, including real-browser runs against a local fake job site and deliberately hostile pages. |
 
 ## Project layout
 
@@ -57,6 +57,7 @@ flowchart TD
 - **Guards against duplicate applications.** Atomic status updates stop a double click sending twice, and a unique hash per pasted text or job URL stops the same advert being processed again. A send interrupted by a crash is flagged for the user rather than retried.
 - **Browser actions are conservative.** It only submits through a button whose label plainly means submit. Success needs both data accepted by the site and a new confirmation. Honeypot fields stay empty, and CAPTCHAs and logins are handed to the user, never bypassed.
 - **Network access is guarded.** Page navigations and redirects in the crawler and the browser are checked against private addresses, so a job page can't send it to a local service.
+- **Readable job descriptions, in the employer's own words.** Pasted adverts are laid out as headings and lists without Gemini. A crawled page is tidied by Gemini once, in the background, and the result is only kept if almost every run of three words in it appears in the original, so it can drop page clutter but never reword the job.
 - **Resilient to overloaded APIs.** Model fallback and capped timeouts keep work moving, and the one Gemini call made during an upload, for scanned CVs, skips long retries. Regexes that scan untrusted pages are bounded and tested against hostile input.
 - **Secrets stay out of the code.** Keys are read from `.env` at runtime and sent in headers, and passwords are never rendered back to the page.
 

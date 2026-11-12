@@ -106,6 +106,7 @@ class Application(models.Model):
     )  # set on an application with a further CV for the same job: it keeps that CV
     job_url = models.URLField(max_length=2000, blank=True)
     jd_text = models.TextField(blank=True)
+    description = models.TextField(blank=True)  # the advert alone, tidied by Gemini from jd_text in its own words
     candidates = models.JSONField(default=list, blank=True)  # addresses printed in the JD
 
     title = models.CharField(max_length=300, blank=True)

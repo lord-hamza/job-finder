@@ -1,5 +1,5 @@
 {% extends "core/base.html" %}
-{% block head %}{% if app.in_flight %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block head %}{% if reload %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
 {% block title %}{{ app.title|default:"Application" }} - Job Finder{% endblock %}
 {% block body %}
 <main class="narrow">
@@ -86,10 +86,22 @@
   {% endif %}
 
   {% if app.jd_text %}
-  <details class="card" style="margin-top:16px">
-    <summary>Job text used</summary>
-    <div class="sent-body small" style="margin-top:12px">{{ app.jd_text }}</div>
-  </details>
+  <section class="card description" style="margin-top:16px">
+    <h2>Job description</h2>
+    {% if posting_facts %}<p class="small muted">{{ posting_facts|join:" · " }}</p>{% endif %}
+    {% if tidying %}<p class="notice info">Gemini is tidying this up from the page, in the posting's own words. {% if reload %}This page updates by itself.{% else %}<a href="">Reload</a> in a minute to see it. Save your changes to the email first.{% endif %}</p>{% endif %}
+    {% for block in description %}
+      {% if block.kind == "heading" %}<h3>{{ block.text }}</h3>
+      {% elif block.kind == "list" %}<ul>{% for item in block.items %}<li>{{ item }}</li>{% endfor %}</ul>
+      {% else %}<p>{{ block.text }}</p>{% endif %}
+    {% empty %}
+      <p class="muted">The posting's text is empty.</p>
+    {% endfor %}
+    <details class="original">
+      <summary class="small">{% if app.source == "crawl" %}Everything read from the page{% else %}The text as you pasted it{% endif %}</summary>
+      <div class="sent-body small">{{ app.jd_text }}</div>
+    </details>
+  </section>
   {% endif %}
 </main>
 {% endblock %}

@@ -117,6 +117,18 @@ class ParsePageTests(AppTestCase):
         self.assertNotIn("<b>", page.text)
         self.assertEqual(page.emails, ["hr@acme.com"])
 
+    def test_a_single_jobs_description_keeps_its_lines_as_plain_text(self):
+        data = [{"@type": "JobPosting", "title": "Dev", "description": "<h3>Duties</h3><ul><li>Build APIs</li><li>Ship</li></ul>"}]
+        page = self.parse(f'<script type="application/ld+json">{json.dumps(data)}</script>')
+        self.assertIn("Job description from the page:\nDuties\nBuild APIs\nShip", page.text)
+        self.assertNotIn('"description"', page.text)
+
+    def test_several_jobs_keep_short_descriptions_in_the_data(self):
+        data = [{"@type": "JobPosting", "title": f"Dev {n}", "description": "x" * 500} for n in range(2)]
+        page = self.parse(f'<script type="application/ld+json">{json.dumps(data)}</script>')
+        self.assertNotIn("Job description from the page", page.text)
+        self.assertIn('"description": "' + "x" * 300 + '"', page.text)
+
     def test_line_break_in_json_ld_doesnt_corrupt_an_address(self):
         data = [{"@type": "JobPosting", "title": "Dev", "description": "please contact\ncareers@qaa.ac.uk"}]
         page = self.parse(f'<script type="application/ld+json">{json.dumps(data)}</script>')

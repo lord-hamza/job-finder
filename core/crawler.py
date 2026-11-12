@@ -216,10 +216,15 @@ def parse_page(html, url, charset=None):
     visible = re.sub(r"\n{2,}", "\n", soup.get_text("\n", strip=True))
 
     sections = [f"Page title: {title}"] if title else []
+    description = ""
+    if len(postings) == 1 and isinstance(postings[0].get("description"), str):
+        description = postings[0].pop("description").strip()  # as plain text below, keeping its lines
     if postings:
         # A JSON "\n" before an address would otherwise read as part of it: "ncareers@acme.com".
         data = _JSON_ESCAPE.sub(" ", json.dumps(postings, ensure_ascii=False))
         sections.append(f"Structured job data:\n{data}")
+    if description:
+        sections.append(f"Job description from the page:\n{description}")
     sections.append(visible)
     if mailtos:
         sections.append("Email links on this page:\n" + "\n".join(mailtos))

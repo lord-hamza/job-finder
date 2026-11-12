@@ -97,6 +97,9 @@ class AppTestMixin:
         self._start(override_settings(ENV_FILE=self.env_file))
         self._start(mock.patch("core.pipeline.spawn", side_effect=lambda fn, *args: fn(*args)))
         self._start(mock.patch("core.pipeline.ensure_form_worker"))  # no test opens Chrome by accident
+        from core import pipeline
+        for remembered in (pipeline._tidying, pipeline._untidy):  # ids are reused from test to test
+            remembered.clear()
         self._start(mock.patch("core.llm.time.sleep"))
         self._start(mock.patch("core.crawler.time.sleep"))
         self._start(

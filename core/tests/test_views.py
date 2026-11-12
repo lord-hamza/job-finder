@@ -145,7 +145,7 @@ class ActivityTests(ViewTestCase):
         self.app(status=Status.SENT, sent_at=timezone.now())
         self.app(status=Status.FAILED)
         counts = self.counts(self.client.get(reverse("activity")))
-        self.assertEqual(counts, {"all": 6, "today": 1, "sent": 2, "ready": 1, "you": 2, "skipped": 0, "failed": 1})
+        self.assertEqual(counts, {"all": 6, "today": 1, "sent": 2, "ready": 1, "you": 2, "skipped": 0, "failed": 1, "urls": 0})
 
     def test_tabs_filter_the_list(self):
         ready = self.app(status=Status.READY, title="Ready one")
@@ -167,10 +167,20 @@ class ActivityTests(ViewTestCase):
         self.app(status=Status.PROCESSING)
         self.assertContains(self.client.get(reverse("activity"), {"show": "failed"}), 'http-equiv="refresh"')
 
-    def test_crawl_runs_show_on_all_only(self):
-        CrawlRun.objects.create(url="https://x.example/jobs", status=CrawlRun.Status.DONE)
-        self.assertContains(self.client.get(reverse("activity")), "https://x.example/jobs")
-        self.assertNotContains(self.client.get(reverse("activity"), {"show": "sent"}), "https://x.example/jobs")
+    def test_links_have_a_tab_of_their_own(self):
+        CrawlRun.objects.create(url="https://www.x.example/careers/search?q=ai", status=CrawlRun.Status.DONE, note="1 sent.")
+        CrawlRun.objects.create(url="https://jobs.y.example/", status=CrawlRun.Status.RUNNING, total=4, done=1)
+        for show in ("all", "sent", "failed"):
+            with self.subTest(show):
+                self.assertNotContains(self.client.get(reverse("activity"), {"show": show}), "x.example")
+        response = self.client.get(reverse("activity"), {"show": "urls"})
+        self.assertEqual(len(response.context["runs"]), 2)
+        self.assertContains(response, "<strong>x.example</strong><span class=\"muted\">/careers/search?q=ai</span>")
+        self.assertContains(response, "1 of 4 jobs")
+        self.assertContains(response, '<strong class="num">2</strong> URLs <span class="running">· 1 running</span>')
+        self.assertContains(response, 'http-equiv="refresh"')  # a link still being read keeps the list fresh
+        self.assertEqual(len(self.client.get(reverse("activity"), {"show": "urls", "q": "y.example"}).context["runs"]), 1)
+        self.assertContains(self.client.get(reverse("activity"), {"show": "urls", "q": "nowhere"}), "No link matches")
 
 
 class UploadTests(AppTestCase):
@@ -688,3 +698,130 @@ class SearchTests(ViewTestCase):
         home = self.client.get(reverse("home"))
         self.assertContains(home, f'action="{reverse("activity")}" target="activity" role="search"')
         self.assertContains(home, '<iframe class="activity" name="activity"')
+
+
+
+class DescriptionPageTests(ViewTestCase):
+    PASTED = (
+        "\U0001d416\U0001d41e \U0001d41a\U0001d42b\U0001d41e \U0001d421\U0001d422\U0001d42b\U0001d422\U0001d427\U0001d420! \U0001f680\n"
+        "Acme is hiring an AI engineer to build agents.\n\nWhat You'll Do:\n \u2705 Build RAG pipelines\n \u2705 Ship APIs\n"
+        "Requirements:\n\u2022 3 years of Python\n\u2022 FastAPI\n" + "More about the team and how we work together. " * 4
+    )
+
+    def test_a_pasted_advert_is_laid_out_without_gemini(self):
+        app = self.app(jd_text=self.PASTED)
+        with mock.patch("core.llm.generate_json") as generate:
+            response = self.client.get(reverse("detail", args=[app.pk]))
+        generate.assert_not_called()
+        for html in ("<h2>Job description</h2>", "<h3>We are hiring! \U0001f680</h3>", "<h3>What You&#x27;ll Do</h3>",
+                     "<ul><li>Build RAG pipelines</li><li>Ship APIs</li></ul>", "<h3>Requirements</h3>",
+                     "<p>Acme is hiring an AI engineer to build agents.</p>", "The text as you pasted it"):
+            with self.subTest(html):
+                self.assertContains(response, html, html=False)
+        self.assertNotContains(response, 'http-equiv="refresh"')
+
+    def crawled(self, text, **fields):
+        return self.app(source=Source.CRAWL, jd_text=text, job_url="https://acme.example/jobs/1", **fields)
+
+    PAGE = "Page title: AI Engineer | Acme\n\n" + "\n".join(["Home", "Jobs", "About", "Log in", "Sign up"] * 8) + (
+        "\nAI Engineer\nWe build agents for support teams and need an engineer to own our retrieval pipeline end to end."
+        "\nResponsibilities\nBuild retrieval pipelines in Python\nShip APIs with FastAPI\nPrivacy\nTerms\n\n"
+        "Email links on this page:\njobs@acme.example"
+    )
+
+    def test_a_crawled_page_is_tidied_by_gemini_in_its_own_words(self):
+        app = self.crawled(self.PAGE)
+        extra = self.app(source=Source.CRAWL, jd_text=self.PAGE, parent=app)
+        answer = {"blocks": [
+            {"kind": "heading", "text": "AI Engineer"},
+            {"kind": "paragraph", "text": "We build agents for support teams and need an engineer to own our retrieval pipeline end to end."},
+            {"kind": "heading", "text": "Responsibilities"},
+            {"kind": "bullet", "text": "Build retrieval pipelines in Python"},
+            {"kind": "bullet", "text": "Ship APIs with FastAPI"},
+        ]}
+        with mock.patch("core.llm.generate_json", return_value=answer) as generate:
+            self.client.get(reverse("detail", args=[app.pk]))
+            response = self.client.get(reverse("detail", args=[extra.pk]))
+        self.assertEqual(generate.call_count, 1, "once for the job, shared by its other applications")
+        self.assertTrue(generate.call_args.kwargs["patient"], "nobody waits on it: the page shows the job's own text meanwhile")
+        self.assertContains(response, "<ul><li>Build retrieval pipelines in Python</li><li>Ship APIs with FastAPI</li></ul>")
+        self.assertNotContains(response, "<p>Log in</p>")
+        app.refresh_from_db()
+        self.assertTrue(app.description.startswith("## AI Engineer"))
+
+    def test_a_rewording_from_gemini_isnt_used_or_asked_for_again(self):
+        app = self.crawled(self.PAGE)
+        answer = {"blocks": [{"kind": "paragraph", "text": "An exciting chance to join a fast-paced, dynamic team " * 6}]}
+        with mock.patch("core.llm.generate_json", return_value=answer) as generate:
+            self.client.get(reverse("detail", args=[app.pk]))
+            response = self.client.get(reverse("detail", args=[app.pk]))
+        self.assertEqual(generate.call_count, 1)
+        app.refresh_from_db()
+        self.assertEqual(app.description, "")
+        self.assertNotContains(response, "exciting chance")
+        self.assertContains(response, "Build retrieval pipelines in Python")  # the page's own text, laid out
+        self.assertNotContains(response, 'http-equiv="refresh"')
+
+    def test_gemini_failing_leaves_the_page_readable(self):
+        app = self.crawled(self.PAGE)
+        with mock.patch("core.llm.generate_json", side_effect=pipeline.llm.LLMError("overloaded")) as generate:
+            self.client.get(reverse("detail", args=[app.pk]))
+            response = self.client.get(reverse("detail", args=[app.pk]))
+        self.assertEqual(generate.call_count, 1)
+        self.assertContains(response, "Everything read from the page")
+
+    def test_the_jobs_own_published_data_is_used_until_then(self):
+        data = ('[{"title": "AI Engineer", "hiringOrganization": {"@type": "Organization", "name": "WAMO Labs"}, '
+                '"jobLocation": {"@type": "Place", "address": {"addressLocality": "Lahore", "addressCountry": "PK"}}, '
+                '"employmentType": "FULL_TIME", "datePosted": "2025-12-09", "description": "Build LLM systems."}]')
+        app = self.crawled(f"Page title: AI Engineer\n\nStructured job data:\n{data}\n\nHome\nJobs")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
+            response = self.client.get(reverse("detail", args=[app.pk]))
+        self.assertContains(response, "WAMO Labs · Lahore, PK · FULL TIME · Posted 2025-12-09")
+        self.assertContains(response, "<p>Build LLM systems.</p>")
+        self.assertNotContains(response, "<p>Home</p>")
+
+    def test_the_description_is_escaped(self):
+        app = self.app(jd_text="<script>alert(1)</script>\n- <img src=x onerror=alert(1)>", description="## <b>Hi</b>")
+        response = self.client.get(reverse("detail", args=[app.pk]))
+        self.assertNotContains(response, "<script>alert")
+        self.assertNotContains(response, "<b>Hi</b>")
+        self.assertNotContains(response, "<img src=x")
+
+
+class DescriptionReloadTests(DescriptionPageTests):
+    def test_a_page_with_a_draft_you_can_edit_never_reloads_by_itself(self):
+        app = self.crawled(self.PAGE, status=Status.READY, body="Dear team, here is my draft.")
+        with mock.patch("core.pipeline.tidy_later", return_value=True):
+            response = self.client.get(reverse("detail", args=[app.pk]))
+        self.assertNotContains(response, 'http-equiv="refresh"')
+        self.assertContains(response, '<a href="">Reload</a> in a minute to see it. Save your changes to the email first.')
+
+    def test_a_sent_job_updates_by_itself(self):
+        app = self.crawled(self.PAGE, status=Status.SENT, sent_at=timezone.now())
+        with mock.patch("core.pipeline.tidy_later", return_value=True):
+            response = self.client.get(reverse("detail", args=[app.pk]))
+        self.assertContains(response, 'http-equiv="refresh"')
+        self.assertContains(response, "This page updates by itself.")
+
+    def test_a_failed_tidy_is_tried_again_after_a_while(self):
+        app = self.crawled(self.PAGE)
+        with mock.patch("core.llm.generate_json", side_effect=pipeline.llm.LLMError("overloaded")) as generate:
+            with mock.patch("core.pipeline.time.monotonic", return_value=10_000):
+                self.client.get(reverse("detail", args=[app.pk]))
+                self.client.get(reverse("detail", args=[app.pk]))
+            with mock.patch("core.pipeline.time.monotonic", return_value=10_000 + pipeline.TIDY_AGAIN_AFTER):
+                self.client.get(reverse("detail", args=[app.pk]))
+        self.assertEqual(generate.call_count, 2)
+
+    def test_jobs_saved_with_one_line_descriptions_get_their_sections_back(self):
+        flat = ("We are looking for an engineer to build LLM systems for our clients. You will help ship them. "
+                "What you'll do Perform LLM fine-tuning and evaluation. Deploy models with FastAPI. "
+                "What we're looking for 2-4 years of experience in applied ML. Strong Python skills.")
+        data = f'[{{"title": "AI Engineer", "description": "{flat}"}}]'
+        app = self.crawled(f"Structured job data:\n{data}\n\nHome")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
+            response = self.client.get(reverse("detail", args=[app.pk]))
+        self.assertContains(response, "<h3>What you&#x27;ll do</h3>")
+        self.assertContains(response, "<ul><li>Perform LLM fine-tuning and evaluation.</li><li>Deploy models with FastAPI.</li></ul>")
+        self.assertContains(response, "<li>Strong Python skills.</li>")

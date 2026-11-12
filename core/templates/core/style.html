@@ -104,6 +104,16 @@ td.nowrap { white-space: nowrap; }
 .num { font-variant-numeric: tabular-nums; }
 .narrow { max-width: 760px; }
 .meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 16px; font-size: 14px; }
+.description h2 { margin-bottom: 8px; }
+.description h3 { font-size: 15px; margin: 18px 0 6px; }
+.description p { margin: 0 0 10px; line-height: 1.6; }
+.description ul { margin: 0 0 10px; padding-left: 22px; line-height: 1.6; }
+.description li { margin: 2px 0; }
+.description .original { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 10px; }
+.description .original summary { cursor: pointer; color: var(--muted); }
+.description .original .sent-body { margin-top: 8px; max-height: 420px; overflow: auto; }
+table.links td a strong, td a strong { font-weight: 600; }
+.tab .running { color: var(--info); }
 .sent-body { white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--field); }
 @media (max-width: 820px) {
   .grid, .setup-grid { grid-template-columns: 1fr; }
