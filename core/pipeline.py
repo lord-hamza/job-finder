@@ -86,9 +86,17 @@ def crawl_max_jobs():
     return _env_int("CRAWL_MAX_JOBS", 15)
 
 
-def sent_today():
+def sent_today(account=None):
+    """Applications sent today: all of them, or those from one Gmail account. The daily limit is for each account."""
     midnight = timezone.localtime().replace(hour=0, minute=0, second=0, microsecond=0)
-    return Application.objects.filter(status=Status.SENT, sent_at__gte=midnight).count()
+    sent = Application.objects.filter(status=Status.SENT, sent_at__gte=midnight)
+    return sent.count() if account is None else sent.filter(sender__iexact=account).count()
+
+
+def account_for(cv):
+    """The account an application with this CV counts against: the Gmail it sends from, or for a website form
+    without one, the CV's own address."""
+    return (sender(cv) or cv.email).lower() if cv else ""
 
 
 def missing_setup(need_gmail=True):
@@ -748,9 +756,12 @@ def _send_problem(app, cv):
     if not sender(cv):
         mine = f"Connect {cv.email}, or choose" if cv.email else "Choose"
         return f"{mine} which Gmail account sends {cv.name}'s emails in Setup."
-    limit = daily_limit()
-    if sent_today() >= limit:
-        return f"Daily limit of {limit} emails reached, so this is saved for later. Raise DAILY_SEND_LIMIT in .env to send more."
+    limit, account = daily_limit(), sender(cv)
+    if sent_today(account) >= limit:
+        return (
+            f"Daily limit of {limit} reached for {account}, so this is saved for later. "
+            "Raise DAILY_SEND_LIMIT in .env to send more from each account."
+        )
     return ""
 
 
@@ -977,7 +988,8 @@ def _fill_form(app, chrome):
     app.refresh_from_db()
     profile, cv = Profile.load(), app.resume
     # auto_send off means the user pressed the button and is watching: they press Submit themselves.
-    under_limit = sent_today() < daily_limit()
+    account = account_for(cv)
+    under_limit = sent_today(account) < daily_limit()
     submit = app.auto_send and under_limit
     try:
         if not cv:
@@ -998,13 +1010,15 @@ def _fill_form(app, chrome):
 
     fields = {"form_answers": outcome.answers, "note": _text(outcome.note), "updated_at": timezone.now()}
     if outcome.state == formfill.SUBMITTED:
-        fields.update(status=Status.SENT, channel=Application.Channel.FORM, sent_at=timezone.now())
+        fields.update(status=Status.SENT, channel=Application.Channel.FORM, sent_at=timezone.now(), sender=account)
     elif outcome.state == formfill.NO_FORM:
         fields.update(status=Status.MANUAL, note=f"{outcome.note} Open the link and use the message below.")
     else:
         fields.update(status=Status.NEEDS_YOU)
         if app.auto_send and not under_limit:
-            fields["note"] = "Daily limit reached, so this form wasn't submitted. Press Fill the form to finish it yourself."
+            fields["note"] = (
+                f"Daily limit reached for {account}, so this form wasn't submitted. Press Fill the form to finish it yourself."
+            )
     Application.objects.filter(pk=app.pk).update(**fields)
 
 
@@ -1021,12 +1035,15 @@ def queue_form(app_id):
 
 
 def mark_applied(app_id):
-    """The user finished the application themselves. Counts towards the daily limit like any other."""
+    """The user finished the application themselves. Counts towards its account's daily limit like any other."""
+    app = Application.objects.select_related("resume").filter(pk=app_id).first()
     return bool(
-        Application.objects.filter(pk=app_id, status__in=[Status.NEEDS_YOU, Status.MANUAL]).update(
+        app
+        and Application.objects.filter(pk=app_id, status__in=[Status.NEEDS_YOU, Status.MANUAL]).update(
             status=Status.SENT,
             channel=Application.Channel.FORM,
             sent_at=timezone.now(),
+            sender=account_for(app.resume),
             note="You marked this as submitted.",
             updated_at=timezone.now(),
         )

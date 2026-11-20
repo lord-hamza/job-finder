@@ -59,6 +59,8 @@ def _render_home(request, **context):
             "attention": attention,
             "setup_open": bool(missing or attention or context.get("add_gmail")) or any(not cv.facts for cv in resumes),
             "accounts": accounts,
+            "accounts_today": [(account, pipeline.sent_today(account)) for account in accounts],
+            "daily_limit": pipeline.daily_limit(),
             "max_accounts": mailer.MAX_ACCOUNTS,
             "country_names": countries.NAMES,
             "gmail_connected": bool(accounts),
@@ -130,7 +132,6 @@ def activity(request):
             "search": search,
             "tabs": [(key, label, rows.count()) for key, label, rows in filters] + [("urls", "URLs", links.count())],
             "running": running,
-            "daily_limit": pipeline.daily_limit(),
         },
     )
 

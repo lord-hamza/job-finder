@@ -84,11 +84,11 @@
       <section>
         <h3>Gmail accounts</h3>
         {% if accounts %}
-        <p class="small muted">Each CV sends from the account with its own email address. If none matches, choose one for it above. The daily limit counts all accounts together.</p>
+        <p class="small muted">Each CV sends from the account with its own email address. If none matches, choose one for it above. Each account sends up to {{ daily_limit }} a day.</p>
         <ul class="accounts">
-          {% for account in accounts %}
+          {% for account, today in accounts_today %}
           <li>
-            <span>{{ account }}</span>
+            <span>{{ account }} <span class="small muted num">{{ today }} / {{ daily_limit }} today</span></span>
             <form method="post" action="{% url 'disconnect_gmail' %}">{% csrf_token %}<input type="hidden" name="address" value="{{ account }}"><button type="submit" class="secondary">Remove</button></form>
           </li>
           {% endfor %}

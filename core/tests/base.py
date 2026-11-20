@@ -93,6 +93,8 @@ class AppTestMixin:
             "DAILY_SEND_LIMIT": "25",
             "CRAWL_MAX_JOBS": "15",
         }
+        for slot in range(2, mailer.MAX_ACCOUNTS + 1):  # your own .env may have more accounts: none of them here
+            env.update(dict.fromkeys(mailer.env_keys(slot), ""))
         self._start(mock.patch.dict(os.environ, env))
         self._start(override_settings(ENV_FILE=self.env_file))
         self._start(mock.patch("core.pipeline.spawn", side_effect=lambda fn, *args: fn(*args)))

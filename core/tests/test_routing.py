@@ -182,6 +182,12 @@ class WorldwideMixin:
         return self.answer(cv, **{"open_to_anywhere": True, "location": "Remote, worldwide",
                                   "application_email": "careers@acme.io", **overrides})
 
+    def us_account_used_up(self):
+        """The US CV's Gmail has already sent today's one; the others haven't sent any."""
+        Application.objects.create(source_hash="earlier-us", source="paste", status=Status.SENT, sender="hamza.us@gmail.com",
+                                   sent_at=pipeline.timezone.now())
+        return mock.patch.dict(os.environ, {"DAILY_SEND_LIMIT": "1"})
+
 
 class EachCountryTests(WorldwideMixin, RoutingTestCase):
     def test_a_worldwide_job_gets_the_best_cv_of_each_country(self):
@@ -300,13 +306,14 @@ class EachCountryTests(WorldwideMixin, RoutingTestCase):
         self.assertEqual(mail.outbox, [])
         self.assertEqual(app.extras.count(), 2)
 
-    def test_the_daily_limit_counts_every_cv(self):
+    def test_the_daily_limit_is_for_each_account(self):
         self.gemini(self.worldwide(), self.further(self.uk),
                     self.further(self.us))
-        with mock.patch.dict(os.environ, {"DAILY_SEND_LIMIT": "2"}):
+        with self.us_account_used_up():
             app = self.submit(WORLDWIDE)
-        self.assertEqual(len(mail.outbox), 2)
-        self.assertIn("Daily limit", app.extras.get(resume=self.us).note)
+        self.assertEqual(self.sent_from(), ["hamza.pk@gmail.com", "hamza.uk@gmail.com"])
+        self.assertIn("Daily limit of 1 reached for hamza.us@gmail.com", app.extras.get(resume=self.us).note)
+        self.assertEqual([pipeline.sent_today(a) for a in ("hamza.pk@gmail.com", "hamza.uk@gmail.com", "hamza.us@gmail.com")], [1, 1, 1])
 
     def test_a_crawled_job_without_an_email_queues_a_form_per_cv(self):
         app, _ = pipeline._claim("crawled", source=Application.Source.CRAWL, job_url="https://acme.io/jobs/1",
@@ -504,7 +511,7 @@ class SafeguardTests(WorldwideMixin, RoutingTestCase):
 
     def submit_group_with_us_waiting(self):
         self.gemini(self.worldwide(), self.further(self.uk), self.further(self.us))
-        with mock.patch.dict(os.environ, {"DAILY_SEND_LIMIT": "2"}):
+        with self.us_account_used_up():
             app = self.submit(WORLDWIDE)
         self.assertEqual(app.extras.get(resume=self.us).status, Status.READY)
         return app
@@ -542,7 +549,7 @@ class SafeguardTests(WorldwideMixin, RoutingTestCase):
 class ByHandTests(WorldwideMixin, RoutingTestCase):
     def test_pressing_send_yourself_goes_even_after_the_same_address_went(self):
         self.gemini(self.worldwide(), self.further(self.uk), self.further(self.us))
-        with mock.patch.dict(os.environ, {"DAILY_SEND_LIMIT": "2"}):
+        with self.us_account_used_up():
             app = self.submit(WORLDWIDE)
         us = app.extras.get(resume=self.us)
         Resume.objects.filter(pk=self.us.pk).update(email="hamza.pk@gmail.com")  # now shares the first one's address
@@ -553,7 +560,7 @@ class ByHandTests(WorldwideMixin, RoutingTestCase):
 
     def test_a_further_application_whose_cv_was_removed_says_so(self):
         self.gemini(self.worldwide(), self.further(self.uk), self.further(self.us))
-        with mock.patch.dict(os.environ, {"DAILY_SEND_LIMIT": "2"}):
+        with self.us_account_used_up():
             app = self.submit(WORLDWIDE)
         us = app.extras.get(resume=self.us)
         self.us.delete()
@@ -688,3 +695,24 @@ class IntegrityTests(WorldwideMixin, RoutingTestCase):
         pipeline.retry(noted.pk)
         noted.refresh_from_db()
         self.assertEqual((noted.status, noted.note), (Status.READY, "Drafted for you to check. Click Send when you're happy with it."))
+
+
+class AccountLimitTests(RoutingTestCase):
+    def test_a_form_and_a_job_you_mark_submitted_count_for_their_cvs_account(self):
+        app = Application.objects.create(source_hash="f", source="crawl", status=Status.FORM_QUEUE, resume=self.uk,
+                                         job_url="https://acme.io/jobs/1", body="Hello", auto_send=True)
+        with mock.patch("core.pipeline.formfill.apply", return_value=pipeline.formfill.Outcome(pipeline.formfill.SUBMITTED)), \
+                mock.patch("core.pipeline.crawler.Crawler") as crawler:
+            crawler.return_value.allowed.return_value = True
+            pipeline._fill_form(app, mock.Mock())
+        manual = Application.objects.create(source_hash="m", source="crawl", status=Status.MANUAL, resume=self.pk)
+        pipeline.mark_applied(manual.pk)
+        self.assertEqual((pipeline.sent_today("hamza.uk@gmail.com"), pipeline.sent_today("hamza.pk@gmail.com")), (1, 1))
+
+    def test_setup_shows_each_accounts_count(self):
+        Application.objects.create(source_hash="s", source="paste", status=Status.SENT, sender="hamza.uk@gmail.com",
+                                   sent_at=pipeline.timezone.now())
+        page = self.client.get(reverse("home"))
+        self.assertContains(page, 'hamza.uk@gmail.com <span class="small muted num">1 / 25 today</span>')
+        self.assertContains(page, 'hamza.pk@gmail.com <span class="small muted num">0 / 25 today</span>')
+        self.assertContains(page, "Each account sends up to 25 a day.")

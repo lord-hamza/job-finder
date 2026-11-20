@@ -108,7 +108,7 @@ Add these to `.env`. The required keys can also be entered in the dashboard:
 | `GMAIL_ADDRESS_2`, `GMAIL_APP_PASSWORD_2`, ... | No | | More accounts, up to 10 |
 | `GEMINI_MODEL` | No | `gemini-flash-lite-latest` | Preferred Gemini model |
 | `MIN_MATCH_SCORE` | No | `60` | Crawled jobs scoring below this are skipped |
-| `DAILY_SEND_LIMIT` | No | `25` | Most emails and forms submitted per day, all accounts together |
+| `DAILY_SEND_LIMIT` | No | `25` | Most emails and forms submitted per day from each Gmail account |
 | `CRAWL_MAX_JOBS` | No | `15` | Most job pages opened per link |
 
 ## Tests
